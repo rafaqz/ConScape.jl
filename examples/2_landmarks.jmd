@@ -17,12 +17,12 @@ grid = 10
 
 ```julia
 datadir = joinpath(dirname(pathof(ConScape)), "..", "data")
-
 ```
 
 ```julia
 mov_prob = replace_missing(Raster(joinpath(datadir, "mov_prob_1000.asc")), NaN)
 hab_qual = replace_missing(Raster(joinpath(datadir, "hab_qual_1000.asc")), NaN);
+affinities
 ```
 
 ```julia
@@ -111,39 +111,47 @@ ops = (;
 )
 # Put least cost, random walk, and rsp
 problem = ConScape.Problem(ops; 
-    connectivity_measure=ConScape.ExpectedCost(θ=1.0),
     distance_transformation=(exp=x -> exp(-x/75), oddsfor=ConScape.OddsFor()),
+    connectivity_measure=ConScape.ExpectedCost(θ=1.0),
+    #distance_transformation=x -> exp(-x/75),
     solver=ConScape.MatrixSolve(),
 )
-problem = ConScape.Problem(ops; 
-    distance_transformation=(exp=x -> exp(-x/75), oddsfor=ConScape.OddsFor()),
-    connectivity_measure=ConScape.ExpectedCost(θ=1.0),
-    solver=ConScape.VectorSolve(nothing),
-)
+# problem = ConScape.Problem(ops; 
+    # connectivity_measure=ConScape.ExpectedCost(θ=1.0),
+    # distance_transformation=(exp=x -> exp(-x/75), oddsfor=ConScape.OddsFor()),
+    # solver=ConScape.VectorSolve(nothing),
+# )
 ```
 
 Then run it for all operations on both normal and coarse grids
 
 ```julia
-res = ConScape.solve(problem, g)
-res_coarse = ConScape.solve(problem, g_coarse)
+rast = RasterStack((; affinities=mov_prob, qualities=hab_qual))
+rast_coarse = ConScape.coarse_graining(rast, 20)
+res = ConScape.solve(problem, rast)
+res_coarse = ConScape.solve(problem, rast_coarse)
 ```
 
 We can plot these outputs:
 ```julia
-heatmap(res.qbetw.oddsfor)
-heatmap(res.qbetw.exp)
-heatmap(res_coarse.qbetw.exp)
-heatmap(res.kbetw.exp)
-heatmap(res_coarse.kbetw.exp)
-heatmap(res.func.exp)
-heatmap(res_coarse.func.exp)
+heatmap(res.qbetw_oddsfor)
+heatmap(res_coarse.qbetw_oddsfor)
+heatmap(res.qbetw_exp)
+heatmap(res_coarse.qbetw_exp)
+heatmap(res.kbetw_exp)
+heatmap(res_coarse.kbetw_exp)
+heatmap(res.func_exp)
+heatmap(res_coarse.func_exp)
 ```
 
 And we can check the corelation similarly to above, by getting
 layers from `res` and `res_coarse`
 ```julia
-cor(filter(!isnan, res.kbetw), filter(!isnan, res_coarse.kbetw))
+cor(filter(!isnan, res.qbetw.oddsfor), filter(!isnan, res_coarse.qbetw.oddsfor))
+cor(filter(!isnan, res.qbetw.oddsfor), filter(!isnan, res_coarse.qbetw.oddsfor))
+cor(filter(!isnan, res.kbetw.oddsfor), filter(!isnan, res_coarse.kbetw.oddsfor))
+cor(filter(!isnan, res.kbetw.exp), filter(!isnan, res_coarse.kbetw.exp))
+cor(filter(!isnan, res.func.exp), filter(!isnan, res_coarse.func.exp))
 ```
 
 # Test landmark performance for amount of connected habitat

@@ -1,8 +1,11 @@
-connectivity_measure(p::AbstractProblem) = p.connectivity_measure
+
+# Recusive getters for nested problems
+graph_measures(p::AbstractProblem) = graph_measures(p.problem)
+connectivity_measure(p::AbstractProblem) = connectivity_measure(p.problem)
 connectivity_function(p::AbstractProblem) =
     connectivity_function(connectivity_measure(p))
-distance_transformation(p::AbstractProblem) = p.distance_transformation
-    
+distance_transformation(p::AbstractProblem) = distance_transformation(p.problem)
+solver(p::AbstractProblem) = solver(p.problem)
 
 """
     solve(problem, grid::Union{Grid,GridRSP})
@@ -63,8 +66,13 @@ Problem(gms::GraphMeasure...; kw...) = Problem(gms; kw...)
 Problem(graph_measures::Union{Tuple,NamedTuple}; kw...) = Problem(; graph_measures, kw...)
 Problem(p::AbstractProblem; solver=p.solver, θ=nothing) = Problem(o.graph_measures, solver, θ)
 
+graph_measures(p::Problem) = p.graph_measures
+connectivity_measure(p::Problem) = p.connectivity_measure
+distance_transformation(p::Problem) = p.distance_transformation
+solver(p::Problem) = p.solver
+
 solve(p::Problem, rast::RasterStack) = solve(p, Grid(p, rast))
-solve(p::Problem, g::Grid) = solve(p.solver, connectivity_measure(p), p, g::Grid)
+solve(p::Problem, g::Grid) = solve(p.solver, connectivity_measure(p), p, g)
 
 
 # Use an iterative solver so the grid is not materialised
@@ -125,9 +133,10 @@ function solve(m::VectorSolve, cm::FundamentalMeasure, p::AbstractProblem, g::Gr
 
     # TODO remove all use of GridRSP
     grsp = GridRSP(g, cm.θ, Pref, W, Z)
-    return map(p.graph_measures) do gm
+    results = map(p.graph_measures) do gm
         compute(gm, p, grsp)
-    end
+    end 
+    return _merge_to_stack(results)
 end
 # Materialise the whole rhs matrix
 function solve(m::MatrixSolve, cm::FundamentalMeasure, p::AbstractProblem, g::Grid) 
@@ -144,15 +153,38 @@ function solve(m::MatrixSolve, cm::FundamentalMeasure, p::AbstractProblem, g::Gr
         @warn "Warning: Z-matrix contains too small values, which can lead to inaccurate results! Check that the graph is connected or try decreasing θ."
     end
     grsp = GridRSP(g, cm.θ, Pref, W, Z)
-    return map(p.graph_measures) do gm
-        compute(gm, grsp)
+    results = map(p.graph_measures) do gm
+        compute(gm, p, grsp)
     end
+    return _merge_to_stack(results)
 end
 function solve(::SolverMode, cm::ConnectivityMeasure, p::AbstractProblem, g::Grid) 
     # GridRSP is not used here
     return map(p.graph_measures) do gm
         compute(gm, p, g)
     end
+end
+
+# We may have multiple distance_measures per
+# graph_measure, but we want a single RasterStack.
+# So we merge the names of the two layers
+function _merge_to_stack(nt::NamedTuple{K}) where K
+    unique_nts = map(K) do k
+        gm = nt[k]
+        if gm isa NamedTuple
+            # Combine outer and inner names with an underscore
+            joinedkeys = map(keys(gm)) do k_inner
+                Symbol(k, :_, k_inner)
+            end
+            # And rename the NamedTuple
+            NamedTuple{joinedkeys}(values(gm))
+        else
+            # We keep the name as is
+            NamedTuple{(k,)}((gm,))
+        end
+    end
+    # merge unique layers into a sinlge RasterStack
+    return RasterStack(merge(unique_nts...))
 end
 
 # @kwdef struct ComputeAssesment{P,M,T}

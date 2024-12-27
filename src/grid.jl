@@ -79,12 +79,12 @@ function Grid(nrows::Integer,
     #     _affinities = affinities
     #     vec(CartesianIndices((nrows, ncols)))
     # end
-    id_to_grid_coordinate_list = vec(collect(CartesianIndices((nrows, ncols))))
+    id_to_grid_coordinate_list = _id_gc_list(nrows, ncols)
 
     costfunction, costmatrix = if costs isa Transformation
         costs, mapnz(costs, affinities)
     else
-        if nrows*ncols != LinearAlgebra.checksquare(costs)
+        if nrows * ncols != LinearAlgebra.checksquare(costs)
             n = size(costs, 1)
             throw(ArgumentError("grid size ($nrows, $ncols) is incompatible with size of cost matrix ($n, $n)"))
         end
@@ -103,7 +103,6 @@ function Grid(nrows::Integer,
     qs = [_source_qualities[i] for i in id_to_grid_coordinate_list]
     qt = [_target_qualities[i] for i in id_to_grid_coordinate_list ∩ targetidx]
 
-    @show typeof(qs) typeof(qt) typeof(targetidx) typeof(targetnodes)
     g = Grid(
         nrows,
         ncols,
@@ -126,6 +125,23 @@ function Grid(nrows::Integer,
         return g
     end
 end
+function Grid(rast::RasterStack; 
+    qualities=get(rast, :qualities) do 
+        ones(nrows, ncols)
+    end,
+    affinities=let
+        affinities_raster = get(rast, :affinities, nothing) 
+        ConScape.graph_matrix_from_raster(affinities_raster)
+    end,
+    source_qualities=get(rast, :source_qualities, qualities),
+    target_qualities=get(rast, :target_qualities, qualities), 
+    costs=get(rast, :costs, MinusLog()),
+    kw...
+)
+    Grid(size(rast)...; affinities, qualities, source_qualities, target_qualities, costs, kw...)  
+end
+# TODO move functions like MinusLog to problems and pass in here
+Grid(p::AbstractProblem, rast::RasterStack) = Grid(rast)
 
 Base.size(g::Grid) = (g.nrows, g.ncols)
 DimensionalData.dims(g::Grid) = g.dims
@@ -133,7 +149,6 @@ DimensionalData.dims(g::Grid) = g.dims
 function Base.show(io::IO, ::MIME"text/plain", g::Grid)
     print(io, summary(g), " of size ", g.nrows, "x", g.ncols)
 end
-
 function Base.show(io::IO, ::MIME"text/html", g::Grid)
     t = string(summary(g), " of size ", g.nrows, "x", g.ncols)
     write(io, "<h4>$t</h4>")
@@ -151,6 +166,8 @@ function Base.show(io::IO, ::MIME"text/html", g::Grid)
         write(io, "</td></tr></table>")
     end
 end
+
+_id_gc_list(nrows, ncols) = vec(collect(CartesianIndices((nrows, ncols))))
 _unwrap(R::Raster) = parent(R)
 _unwrap(R::AbstractMatrix) = R
 # Compute a vector of the cartesian indices of nonzero target qualities and
@@ -342,15 +359,14 @@ end
 
 A helper-function, used by coarse_graining, that computes the sum of pixels within a npix neighborhood around the target rc.
 """
-function sum_neighborhood(g, rc, npix)
+sum_neighborhood(g, rc, npix) = sum_neighborhood(g.target_qualities, rc, npix)
+function sum_neighborhood(target_qualities::AbstractMatrix, rc, npix)
     getrows = (rc[1] - floor(Int, npix/2)):(rc[1] + (ceil(Int, npix/2) - 1))
     getcols = (rc[2] - floor(Int, npix/2)):(rc[2] + (ceil(Int, npix/2) - 1))
     # pixels outside of the landscape are encoded with NaNs but we don't want
     # the NaNs to propagate to the coarse grained values
-    return sum(t -> isnan(t) ? 0.0 : t, g.target_qualities[getrows, getcols])
+    return sum(t -> isnan(t) ? 0.0 : t, target_qualities[getrows, getcols])
 end
-
-
 
 """
     coarse_graining(g::Grid, npix::Integer)::Array
@@ -358,23 +374,43 @@ end
 Creates a sparse matrix of target qualities for the landmarks based on merging npix pixels into the center pixel.
 """
 function coarse_graining(g, npix)
-    getrows = (floor(Int, npix/2)+1):npix:(g.nrows-ceil(Int, npix/2)+1)
-    getcols = (floor(Int, npix/2)+1):npix:(g.ncols-ceil(Int, npix/2)+1)
+    coarse_graining(g.target_qualities, npix; 
+        id_to_grid_coordinate_list=g.id_to_grid_coordinate_list
+    )
+end
+coarse_graining(rast::AbstractRaster, npix; kw...) =
+    rebuild(rast, coarse_graining(parent(rast), npix; kw...))
+function coarse_graining(rast::AbstractRasterStack, npix; kw...)
+    # Get target qualities or qualities
+    target = get(rast, :target_qualities) do
+        get(rast, :qualities) do
+            throw(ArgumentError("No :target_qualities or :qualities layers found"))
+        end
+    end
+    target_qualities = coarse_graining(target, npix; kw...)
+    return Base.setindex(rast, target_qualities, :target_qualities)
+end
+function coarse_graining(M::AbstractMatrix, npix;
+    id_to_grid_coordinate_list=_id_gc_list(size(M)...)
+)
+    nrows, ncols = size(M)
+    getrows = (floor(Int, npix/2)+1):npix:(nrows-ceil(Int, npix/2)+1)
+    getcols = (floor(Int, npix/2)+1):npix:(ncols-ceil(Int, npix/2)+1)
     coarse_target_rc = Base.product(getrows, getcols)
     coarse_target_ids = vec(
         [
             findfirst(
                 isequal(CartesianIndex(ij)),
-                g.id_to_grid_coordinate_list
+                id_to_grid_coordinate_list
             ) for ij in coarse_target_rc
         ]
     )
     coarse_target_rc = [ij for ij in coarse_target_rc if !ismissing(ij)]
     filter!(!ismissing, coarse_target_ids)
-    V = [sum_neighborhood(g, ij, npix) for ij in coarse_target_rc]
+    V = [sum_neighborhood(M, ij, npix) for ij in coarse_target_rc]
     I = first.(coarse_target_rc)
     J = last.(coarse_target_rc)
-    target_mat = sparse(I, J, V, g.nrows, g.ncols)
+    target_mat = sparse(I, J, V, nrows, ncols)
     target_mat = dropzeros(target_mat)
 
     return target_mat
