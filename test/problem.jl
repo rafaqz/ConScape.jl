@@ -15,28 +15,29 @@ graph_measures = graph_measures = (;
     func=ConScape.ConnectedHabitat(),
     qbetw=ConScape.BetweennessQweighted(),
     kbetw=ConScape.BetweennessKweighted(),
+    # mkld=ConScape.MeanKullbackLeiblerDivergence(),
+    # mlcd=ConScape.MeanLeastCostKullbackLeiblerDivergence(),
 )
 distance_transformation = (exp=x -> exp(-x/75), oddsfor=ConScape.OddsFor())
-connectivity_measure = ConScape.ExpectedCost(θ=1.0)
+connectivity_measure = ConScape.ExpectedCost(; θ=1.0, distance_transformation)
 
-expected_layers = (:func_exp, :func_oddsfor, :qbetw_exp, :qbetw_oddsfor, :kbetw_exp, :kbetw_oddsfor)
+expected_layers = (:func_exp, :func_oddsfor, :qbetw, :kbetw_exp, :kbetw_oddsfor)#, :mkld, :mlcd)
 
 # Basic Problem
 problem = ConScape.Problem(; 
-    graph_measures, distance_transformation, connectivity_measure,
-    solver = ConScape.MatrixSolver(),
+    graph_measures, connectivity_measure, solver=ConScape.MatrixSolver(),
 )
 @time result = ConScape.solve(problem, rast)
 @test result isa RasterStack
 @test size(result) == size(rast)
 @test keys(result) == expected_layers
 
-# Optimised problem
+# Threaded solve problem
 vector_problem = ConScape.Problem(; 
-    graph_measures, distance_transformation, connectivity_measure,
+    graph_measures, connectivity_measure,
     solver = ConScape.VectorSolver(; threaded=true),
 )
-@profview vector_result = ConScape.solve(vector_problem, rast)
+@time vector_result = ConScape.solve(vector_problem, rast)
 @test vector_result isa RasterStack
 @test size(vector_result) == size(rast)
 @test keys(vector_result) == expected_layers
@@ -44,7 +45,7 @@ vector_problem = ConScape.Problem(;
 
 # Problem with custom solver
 linearsolve_problem = ConScape.Problem(; 
-    graph_measures, distance_transformation, connectivity_measure,
+    graph_measures, connectivity_measure,
     solver = ConScape.LinearSolver(KrylovJL_GMRES(precs = (A, p) -> (Diagonal(A), I))),
 )
 @time ls_result = ConScape.solve(linearsolve_problem, rast)
@@ -62,8 +63,9 @@ windowed_result = ConScape.solve(windowed_problem, rast)
 @test keys(windowed_result) == expected_layers 
 
 # StoredProblem writes files to disk and mosaics to RasterStack
+
 stored_problem = ConScape.StoredProblem(problem; 
-    path=tempdir(), radius=40, overlap=10, threaded=true
+    path=tempname(), radius=40, overlap=10, threaded=true
 )
 ConScape.solve(stored_problem, rast)
 stored_result = mosaic(stored_problem; to=rast)
@@ -77,7 +79,7 @@ stored_result = mosaic(stored_problem; to=rast)
 # StoredProblem can be run as batch jobs for clusters
 # We just need a new path to make sure the result is from a new run
 stored_problem2 = ConScape.StoredProblem(problem; 
-    path=tempdir(), radius=40, overlap=10, threaded=true
+    path=tempname(), radius=40, overlap=10, threaded=true
 )
 jobs = ConScape.batch_ids(stored_problem2, rast) 
 @test jobs isa Vector{Int}
@@ -95,9 +97,9 @@ small_windowed_problem = ConScape.WindowedProblem(problem;
     radius=25, overlap=5,
 )
 nested_problem = ConScape.StoredProblem(small_windowed_problem; 
-    path=tempdir(), radius=40, overlap=10, threaded=true
+    path=tempname(), radius=40, overlap=10, threaded=true
 )
-ConScape.solve(stored_problem, rast)
+ConScape.solve(nested_problem, rast)
 nested_result = mosaic(nested_problem; to=rast)
 @test nested_result isa RasterStack
 @test size(nested_result) == size(rast)

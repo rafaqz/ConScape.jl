@@ -34,7 +34,7 @@ end
 end
 
 # These maybe don't quite belong here?
-@kwdef struct EigMax{F,DV,T} <: TopologicalMeasure
+@kwdef struct EigMax{DV,T} <: TopologicalMeasure
     diagvalue::DV=nothing
     tol::T=1e-14
 end
@@ -49,31 +49,31 @@ graph_function(m::BetweennessKweighted) = betweenness_kweighted
 graph_function(m::BetweennessQweighted) = betweenness_qweighted
 graph_function(m::ConnectedHabitat) = connected_habitat
 graph_function(m::Criticality) = criticality
-# Returns a tuple
-graph_function(m::EigMax) = eigmax
 # These return scalars
 graph_function(m::MeanLeastCostKullbackLeiblerDivergence) = mean_lc_kl_divergence
 graph_function(m::MeanKullbackLeiblerDivergence) = mean_kl_divergence
 # These return sparse arrays
 graph_function(m::EdgeBetweennessKweighted) = edge_betweenness_kweighted
 graph_function(m::EdgeBetweennessQweighted) = edge_betweenness_qweighted
+# Returns a tuple
+graph_function(m::EigMax) = eigmax
 
 # Map structs to function keywords, 
 # a bit of a hack until we refactor the rest
 keywords(gm::GraphMeasure, p::AbstractProblem) = 
-    (; _keywords(gm)..., solver=solver(p))
+    (; _keywords(gm)...)#, solver=solver(p))
 keywords(gm::ConnectedHabitat, p::AbstractProblem) = 
-    (; _keywords(gm)..., solver=solver(p), approx=connectivity_measure(p).approx) 
+    (; _keywords(gm)..., approx=connectivity_measure(p).approx)#, solver=solver(p))
 
 # A trait for connectivity requirement
 struct NeedsConnectivity end
 struct NoConnectivity end
 needs_connectivity(::GraphMeasure) = NoConnectivity()
 needs_connectivity(::BetweennessKweighted) = NeedsConnectivity()
-needs_connectivity(::BetweennessKweighted) = NeedsConnectivity()
 needs_connectivity(::EdgeBetweennessKweighted) = NeedsConnectivity()
 needs_connectivity(::EigMax) = NeedsConnectivity()
 needs_connectivity(::ConnectedHabitat) = NeedsConnectivity()
+needs_connectivity(::Criticality) = NeedsConnectivity()
 
 # compute
 # This is where things actually happen
@@ -92,10 +92,10 @@ function compute(::NeedsConnectivity,
     # Handle multiple distance transformations
     if distance_transformation isa NamedTuple
         map(distance_transformation) do dt
-            graph_function(gm)(g; keywords(m, p)..., distance_transformation=dt, connectivity_function)
+            graph_function(gm)(g; keywords(gm, p)..., distance_transformation=dt, connectivity_function)
         end
     else
-        graph_function(gm)(g; keywords(m, p)..., distance_transformation=dt, connectivity_function)
+        graph_function(gm)(g; keywords(gm, p)..., distance_transformation=dt, connectivity_function)
     end
 end
 function compute(::NoConnectivity,
@@ -103,5 +103,5 @@ function compute(::NoConnectivity,
     p::AbstractProblem, 
     g::Union{Grid,GridRSP}
 ) 
-    graph_function(gm)(g; keywords(m, p)...)
+    graph_function(gm)(g; keywords(gm, p)...)
 end

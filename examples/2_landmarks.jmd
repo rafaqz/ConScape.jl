@@ -110,10 +110,12 @@ problem = ConScape.Problem(;
         qbetw=ConScape.BetweennessQweighted(),
         kbetw=ConScape.BetweennessKweighted(),
     ),
-    distance_transformation=(exp=x -> exp(-x/75), oddsfor=ConScape.OddsFor()),
-    connectivity_measure=ConScape.ExpectedCost(θ=1.0),
-    solver=ConScape.MatrixSolve(),
-    # solver=ConScape.VectorSolve(nothing),
+    connectivity_measure=ConScape.ExpectedCost(
+        θ=1.0, 
+        distance_transformation = (exp=x -> exp(-x/75), oddsfor=ConScape.OddsFor())
+    ),
+    solver=ConScape.MatrixSolver(),
+    # solver=ConScape.VectorSolver(nothing),
 )
 ```
 

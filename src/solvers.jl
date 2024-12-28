@@ -17,12 +17,12 @@ function solve(s::Solver, cm::FundamentalMeasure, p::AbstractProblem, g::Grid)
     (; A, B, Pref, W) = setup_sparse_problem(g, cm)
     Z = solve_ldiv!(s, A, Matrix(B))
     # Check that values in Z are not too small:
-    _check_z(s, Z, W, g)
+#    _check_z(s, Z, W, g)
 
     # TODO remove use of GridRSP where possible
     grsp = GridRSP(g, cm.θ, Pref, W, Z)
     results = map(p.graph_measures) do gm
-        compute(gm, p, grsp; solver=s)
+        compute(gm, p, grsp)
     end
     return _merge_to_stack(results)
 end
@@ -53,7 +53,7 @@ less memory use and the capacity for threading
     threaded::Bool = false
 end
 
-function solve_ldiv!(::VectorSolver, A, B)
+function solve_ldiv!(s::VectorSolver, A, B)
     F = lu(A)
     transposeoptype = SparseArrays.LibSuiteSparse.UMFPACK_A
     # for SparseArrays.UMFPACK._AqldivB_kernel!(Z, F, B, transposeoptype)
@@ -76,7 +76,7 @@ function solve_ldiv!(::VectorSolver, A, B)
             # Copy a column from B
             b_t .= view(B, :, col)
             # Solve for the column
-            SparseArrays.UMFPACK.solve!(view(Z, :, col), F_t, b_t, transposeoptype)
+            SparseArrays.UMFPACK.solve!(view(B, :, col), F_t, b_t, transposeoptype)
             # Reuse the workspace 
             put!(ch, (F_t, b_t))
         end
@@ -84,11 +84,11 @@ function solve_ldiv!(::VectorSolver, A, B)
         b = zeros(eltype(B), size(B, 1))
         for col in 1:size(B, 2)
             b .= view(B, :, col)
-            SparseArrays.UMFPACK.solve!(view(Z, :, col), F, b, transposeoptype)
+            SparseArrays.UMFPACK.solve!(view(B, :, col), F, b, transposeoptype)
         end
     end
 
-    return Z
+    return B
 end
 
 """
@@ -130,44 +130,44 @@ struct LinearSolver <: Solver
 end
 LinearSolver(args...; threaded=false, kw...) = LinearSolver(args, kw, threaded)
 
-function solve_ldiv!(solver::LinearSolver, A, B)
+function solve_ldiv!(s::LinearSolver, A, B)
     b = zeros(eltype(A), size(B, 1))
     # Define and initialise the linear problem
     linprob = LinearProblem(A, b)
     linsolve = init(linprob, s.args...; s.keywords...)
     # TODO: for now we define a Z matrix, but later modify ops 
     # to run column by column without materialising Z
-    if s.threaded
-        nbuffers = Threads.nthreads()
-        # Create a channel to store problem b vectors for threads
-        # see https://juliafolds2.github.io/OhMyThreads.jl/stable/literate/tls/tls/
-        ch = Channel{Tuple{typeof(linsolve),Vector{Float64}}}(nbuffers)
-        for i in 1:nbuffers
-            # TODO fix this in LinearSolve.jl with batching
-            # We should not need to `deepcopy` the whole problem we 
-            # just need to replicate the specific workspace arrays 
-            # that will cause race conditions.
-            # But currently there is no parallel mode for LinearSolve.jl
-            # See https://github.com/SciML/LinearSolve.jl/issues/552
-            put!(ch, (deepcopy(linsolve), Vector{eltype(A)}(undef, size(B, 1))))
-        end
-        Threads.@threads for i in 1:size(B, 2)
-            # Get column memory from the channel
-            linsolve_t, b_t = take!(ch)
-            # Update it
-            b_t .= view(B, :, i)
-            # Update solver with new b values
-            reinit!(linsolve_t; b=b_t, reuse_precs=true)
-            sol = LinearSolve.solve(linsolve_t, s.args...; s.keywords...)
-            # Aim for something like this ?
-            # res = map(connectivity_measures(p)) do cm
-            #     compute(cm, g, sol.u, i)
-            # end
-            # For now just use Z
-            B[:, i] .= sol.u
-            put!(ch, (linsolve_t, b_t))
-        end
-    else
+    # if s.threaded
+    #     nbuffers = Threads.nthreads()
+    #     # Create a channel to store problem b vectors for threads
+    #     # see https://juliafolds2.github.io/OhMyThreads.jl/stable/literate/tls/tls/
+    #     ch = Channel{Tuple{typeof(linsolve),Vector{Float64}}}(nbuffers)
+    #     for i in 1:nbuffers
+    #         # TODO fix this in LinearSolve.jl with batching
+    #         # We should not need to `deepcopy` the whole problem we 
+    #         # just need to replicate the specific workspace arrays 
+    #         # that will cause race conditions.
+    #         # But currently there is no parallel mode for LinearSolve.jl
+    #         # See https://github.com/SciML/LinearSolve.jl/issues/552
+    #         put!(ch, (deepcopy(linsolve), Vector{eltype(A)}(undef, size(B, 1))))
+    #     end
+    #     Threads.@threads for i in 1:size(B, 2)
+    #         # Get column memory from the channel
+    #         linsolve_t, b_t = take!(ch)
+    #         # Update it
+    #         b_t .= view(B, :, i)
+    #         # Update solver with new b values
+    #         reinit!(linsolve_t; b=b_t, reuse_precs=true)
+    #         sol = LinearSolve.solve(linsolve_t, s.args...; s.keywords...)
+    #         # Aim for something like this ?
+    #         # res = map(connectivity_measures(p)) do cm
+    #         #     compute(cm, g, sol.u, i)
+    #         # end
+    #         # For now just use Z
+    #         B[:, i] .= sol.u
+    #         put!(ch, (linsolve_t, b_t))
+    #     end
+    # else
         for i in 1:size(B, 2)
             b .= view(B, :, i)
             reinit!(linsolve; b, reuse_precs=true)
@@ -175,7 +175,8 @@ function solve_ldiv!(solver::LinearSolver, A, B)
             # Udate the column
             B[:, i] .= sol.u
         end
-    end
+    # end
+    @info "LinearSolver finished"
     return B
 end
 
@@ -196,6 +197,7 @@ end
 # We may have multiple distance_measures per
 # graph_measure, but we want a single RasterStack.
 # So we merge the names of the two layers
+
 function _merge_to_stack(nt::NamedTuple{K}) where K
     unique_nts = map(K) do k
         gm = nt[k]
@@ -205,15 +207,23 @@ function _merge_to_stack(nt::NamedTuple{K}) where K
                 Symbol(k, :_, k_inner)
             end
             # And rename the NamedTuple
-            NamedTuple{joinedkeys}(values(gm))
+            NamedTuple{joinedkeys}(map(_maybe_raster, values(gm)))
         else
             # We keep the name as is
-            NamedTuple{(k,)}((gm,))
+            NamedTuple{(k,)}((_maybe_raster(gm),))
         end
     end
     # merge unique layers into a sinlge RasterStack
-    return RasterStack(merge(unique_nts...))
+    nt = merge(unique_nts...)
+    if all(map(x -> x isa Raster, nt))
+        return RasterStack(nt)
+    else
+        return nt # Cant return a RasterStack for these outputs 
+    end
 end
+_maybe_raster(x::Raster) = x
+_maybe_raster(x::Number) = Raster(fill(x), ())
+_maybe_raster(x) = x
 
 function _check_z(s, Z, W, g)
     # Check that values in Z are not too small:

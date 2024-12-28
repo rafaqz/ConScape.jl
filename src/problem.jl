@@ -41,7 +41,7 @@ to be run in the same job.
 - `connectivity_measure`: A [`ConnectivityMeasure`](@ref).
 - `solver`: A [`Solver`](@ref) specification.
 """
-@kwdef struct Problem{GM,CM<:ConnectivityMeasure,DT,SM<:Solver} <: AbstractProblem
+@kwdef struct Problem{GM,CM<:ConnectivityMeasure,SM<:Solver} <: AbstractProblem
     graph_measures::GM
     connectivity_measure::CM = LeastCostDistance()
     solver::SM = MatrixSolver()
