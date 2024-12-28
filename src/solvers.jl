@@ -7,14 +7,28 @@ Abstract supertype for ConScape solvers.
 """ Solver 
 
 # RSP is not used for ConnectivityMeasure, so the solver isn't used
-function solve(::Solver, cm::ConnectivityMeasure, p::AbstractProblem, g::Grid) 
+function solve(s::Solver, cm::ConnectivityMeasure, p::AbstractProblem, g::Grid) 
     return map(p.graph_measures) do gm
-        compute(gm, p, g)
+        compute(gm, p, g; solver=s)
     end
 end
 
+function solve(s::Solver, cm::FundamentalMeasure, p::AbstractProblem, g::Grid) 
+    (; A, B, Pref, W) = setup_sparse_problem(g, cm)
+    Z = solve_ldiv!(s, A, Matrix(B))
+    # Check that values in Z are not too small:
+    _check_z(s, Z, W, g)
+
+    # TODO remove use of GridRSP where possible
+    grsp = GridRSP(g, cm.θ, Pref, W, Z)
+    results = map(p.graph_measures) do gm
+        compute(gm, p, grsp; solver=s)
+    end
+    return _merge_to_stack(results)
+end
+
 """
-   MatrixSolver()
+   MatrixSolver(; check)
 
 Solve all operations on a fully materialised Z matrix.
 
@@ -25,20 +39,56 @@ But may be best for GPUs using CuSSP.jl ?
     check::Bool = true
 end
 
-# Materialise the whole rhs matrix
-function solve(s::MatrixSolver, cm::FundamentalMeasure, p::AbstractProblem, g::Grid) 
-    (; A, B, Pref, W) = setup_sparse_problem(g, cm)
-    # Nearly all the work and allocation happens here
-    Z = A \ Matrix(B)
-    # Check that values in Z are not too small:
-    if s.check && minimum(Z) * minimum(nonzeros(g.costmatrix .* W)) == 0
-        @warn "Warning: Z-matrix contains too small values, which can lead to inaccurate results! Check that the graph is connected or try decreasing θ."
+# Fallback generic ldiv solver
+solve_ldiv!(solver, A, B) = ldiv!(lu(A), B)
+
+"""
+   VectorSolver(; check, threaded)
+
+Use julias default solver but broken into columns, with 
+less memory use and the capacity for threading
+"""
+@kwdef struct VectorSolver <: Solver 
+    check::Bool = true
+    threaded::Bool = false
+end
+
+function solve_ldiv!(::VectorSolver, A, B)
+    F = lu(A)
+    transposeoptype = SparseArrays.LibSuiteSparse.UMFPACK_A
+    # for SparseArrays.UMFPACK._AqldivB_kernel!(Z, F, B, transposeoptype)
+
+    # This is basically SparseArrays.UMFPACK._AqldivB_kernel!
+    # But we unroll it to avoid copies or allocation of B
+    if s.threaded
+        # Create a channel to store problem b vectors for threads
+        # see https://juliafolds2.github.io/OhMyThreads.jl/stable/literate/tls/tls/
+        nbuffers = Threads.nthreads()
+        ch = Channel{Tuple{typeof(F),Vector{Float64}}}(nbuffers)
+        for i in 1:nbuffers
+            # TODO not all of F needs to be duplicated?
+            # Can we just copy the workspace arrays and resuse the rest?
+            put!(ch, (deepcopy(F), Vector{eltype(A)}(undef, size(B, 1))))
+        end
+        Threads.@threads for col in 1:size(B, 2)
+            # Get a workspace from the channel
+            F_t, b_t = take!(ch)
+            # Copy a column from B
+            b_t .= view(B, :, col)
+            # Solve for the column
+            SparseArrays.UMFPACK.solve!(view(Z, :, col), F_t, b_t, transposeoptype)
+            # Reuse the workspace 
+            put!(ch, (F_t, b_t))
+        end
+    else
+        b = zeros(eltype(B), size(B, 1))
+        for col in 1:size(B, 2)
+            b .= view(B, :, col)
+            SparseArrays.UMFPACK.solve!(view(Z, :, col), F, b, transposeoptype)
+        end
     end
-    grsp = GridRSP(g, cm.θ, Pref, W, Z)
-    results = map(p.graph_measures) do gm
-        compute(gm, p, grsp)
-    end
-    return _merge_to_stack(results)
+
+    return Z
 end
 
 """
@@ -80,17 +130,13 @@ struct LinearSolver <: Solver
 end
 LinearSolver(args...; threaded=false, kw...) = LinearSolver(args, kw, threaded)
 
-# Use an iterative solver so the grid is not materialised
-function solve(s::LinearSolver, cm::FundamentalMeasure, p::AbstractProblem, g::Grid)
-    (; A, B) = setup_sparse_problem(g, cm)
-    # Dense rhs column
-    b_init = zeros(eltype(A), size(B, 1))
+function solve_ldiv!(solver::LinearSolver, A, B)
+    b = zeros(eltype(A), size(B, 1))
     # Define and initialise the linear problem
-    linprob = LinearProblem(A, b_init)
+    linprob = LinearProblem(A, b)
     linsolve = init(linprob, s.args...; s.keywords...)
     # TODO: for now we define a Z matrix, but later modify ops 
     # to run column by column without materialising Z
-    Z = Matrix{eltype(A)}(undef, size(B))
     if s.threaded
         nbuffers = Threads.nthreads()
         # Create a channel to store problem b vectors for threads
@@ -118,26 +164,19 @@ function solve(s::LinearSolver, cm::FundamentalMeasure, p::AbstractProblem, g::G
             #     compute(cm, g, sol.u, i)
             # end
             # For now just use Z
-            Z[:, i] .= sol.u
+            B[:, i] .= sol.u
             put!(ch, (linsolve_t, b_t))
         end
     else
         for i in 1:size(B, 2)
-            b_init .= view(B, :, i)
-            reinit!(linsolve; b=b_init, reuse_precs=true)
+            b .= view(B, :, i)
+            reinit!(linsolve; b, reuse_precs=true)
             sol = LinearSolve.solve(linsolve, s.args...; s.keywords...)
             # Udate the column
-            Z[:, i] .= sol.u
+            B[:, i] .= sol.u
         end
     end
-    # return _combine(res, g) # return results as Rasters
-
-    # TODO remove all use of GridRSP
-    grsp = GridRSP(g, cm.θ, Pref, W, Z)
-    results = map(p.graph_measures) do gm
-        compute(gm, p, grsp)
-    end 
-    return _merge_to_stack(results)
+    return B
 end
 
 
@@ -148,15 +187,11 @@ function setup_sparse_problem(g::Grid, cm::FundamentalMeasure)
     W = _W(Pref, cm.θ, g.costmatrix)
     # Sparse lhs
     A = I - W
-    # Sparse diagonal rhs matrix
-    B = sparse(g.targetnodes,
-        1:length(g.targetnodes),
-        1.0,
-        size(g.costmatrix, 1),
-        length(g.targetnodes),
-    )
+    # Sparse rhs
+    B = sparse_rhs(g.targetnodes, size(g.costmatrix, 1))
     return (; A, B, Pref, W)
 end
+
 
 # We may have multiple distance_measures per
 # graph_measure, but we want a single RasterStack.
@@ -178,4 +213,11 @@ function _merge_to_stack(nt::NamedTuple{K}) where K
     end
     # merge unique layers into a sinlge RasterStack
     return RasterStack(merge(unique_nts...))
+end
+
+function _check_z(s, Z, W, g)
+    # Check that values in Z are not too small:
+    if s.check && minimum(Z) * minimum(nonzeros(g.costmatrix .* W)) == 0
+        @warn "Warning: Z-matrix contains too small values, which can lead to inaccurate results! Check that the graph is connected or try decreasing θ."
+    end
 end

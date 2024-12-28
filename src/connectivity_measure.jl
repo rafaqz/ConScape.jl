@@ -3,15 +3,17 @@
 abstract type ConnectivityMeasure end
 
 abstract type FundamentalMeasure <: ConnectivityMeasure end
-abstract type RSPDistanceMeasure <: FundamentalMeasure end
+abstract type DistanceMeasure <: FundamentalMeasure end
 
 struct LeastCostDistance <: ConnectivityMeasure end
-@kwdef struct ExpectedCost{T<:Union{Real,Nothing}} <: RSPDistanceMeasure 
+@kwdef struct ExpectedCost{T<:Union{Real,Nothing},CM} <: DistanceMeasure 
     θ::T=nothing
+    distance_transformation::CM=nothing
     approx::Bool=false
 end
-@kwdef struct FreeEnergyDistance{T<:Union{Real,Nothing}} <: RSPDistanceMeasure 
+@kwdef struct FreeEnergyDistance{T<:Union{Real,Nothing},CM} <: DistanceMeasure 
     θ::T=nothing
+    distance_transformation::CM=nothing
     approx::Bool=false
 end
 @kwdef struct SurvivalProbability{T<:Union{Real,Nothing}} <: FundamentalMeasure 
@@ -34,5 +36,5 @@ connectivity_function(::SurvivalProbability) = survival_probability
 connectivity_function(::PowerMeanProximity) = power_mean_proximity
 
 # This is not used yet but could be
-compute(cm::ConnectivityMeasure, g) = 
-    connectivity_function(m)(g; keywords(cm)...)
+compute(cm::ConnectivityMeasure, g; kw...) = 
+    connectivity_function(m)(g; keywords(cm)..., kw...)

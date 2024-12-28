@@ -11,7 +11,6 @@ graph_measures(p::AbstractProblem) = graph_measures(p.problem)
 connectivity_measure(p::AbstractProblem) = connectivity_measure(p.problem)
 connectivity_function(p::AbstractProblem) =
     connectivity_function(connectivity_measure(p))
-distance_transformation(p::AbstractProblem) = distance_transformation(p.problem)
 solver(p::AbstractProblem) = solver(p.problem)
 
 """
@@ -39,21 +38,18 @@ to be run in the same job.
 # Keywords
 
 - `graph_measures`: A NamedTuple of [`GraphMeasure`](@ref)s.
-- `distance_transformation`: A [`DistanceTransformation`](@ref) or `NamedTuple` of `DistanceTransformation`s.
 - `connectivity_measure`: A [`ConnectivityMeasure`](@ref).
 - `solver`: A [`Solver`](@ref) specification.
 """
 @kwdef struct Problem{GM,CM<:ConnectivityMeasure,DT,SM<:Solver} <: AbstractProblem
     graph_measures::GM
     connectivity_measure::CM = LeastCostDistance()
-    distance_transformation::DT = nothing
     solver::SM = MatrixSolver()
 end
 Problem(graph_measures::Union{Tuple,NamedTuple}; kw...) = Problem(; graph_measures, kw...)
 
 graph_measures(p::Problem) = p.graph_measures
 connectivity_measure(p::Problem) = p.connectivity_measure
-distance_transformation(p::Problem) = p.distance_transformation
 solver(p::Problem) = p.solver
 
 solve(p::Problem, rast::RasterStack) = solve(p, Grid(p, rast))

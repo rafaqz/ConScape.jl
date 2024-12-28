@@ -1,3 +1,9 @@
+"""
+    GraphMeasure 
+
+Abstract supertype for graph measures.
+These are lazy definitions of conscape functions.
+"""
 abstract type GraphMeasure end
 
 keywords(o::GraphMeasure) = _keywords(o)
@@ -27,44 +33,75 @@ end
     qᵗvalue::QT=0.0
 end
 
-# These maybe don't quite belong here
+# These maybe don't quite belong here?
 @kwdef struct EigMax{F,DV,T} <: TopologicalMeasure
     diagvalue::DV=nothing
     tol::T=1e-14
 end
+
 struct MeanLeastCostKullbackLeiblerDivergence <: PathDistributionMeasure end
 struct MeanKullbackLeiblerDivergence <: PathDistributionMeasure end
 
-# Kind of a hack for now but makes the input requirements clear
-keywords(o::GraphMeasure, dt, p::AbstractProblem) = 
-    (; _keywords(o)..., distance_transformation=dt)
-keywords(o::Union{BetweennessQweighted,EdgeBetweennessQweighted,PathDistributionMeasure}, dt, p::AbstractProblem) = 
-    (; _keywords(o)...)
-keywords(o::Union{BetweennessKweighted,EigMax}, dt, p::AbstractProblem) = 
-    (; _keywords(o)..., 
-        connectivity_function=connectivity_function(p), 
-        distance_transformation=dt)
-keywords(o::ConnectedHabitat, dt, p::AbstractProblem) = 
-    (; _keywords(o)..., 
-        distance_transformation=dt,
-        connectivity_function=connectivity_function(p), 
-        approx=connectivity_measure(p).approx) 
+# Map structs to functions
 
+# These return Rasters
 graph_function(m::BetweennessKweighted) = betweenness_kweighted
-graph_function(m::EdgeBetweennessKweighted) = edge_betweenness_kweighted
 graph_function(m::BetweennessQweighted) = betweenness_qweighted
-graph_function(m::EdgeBetweennessQweighted) = edge_betweenness_qweighted
 graph_function(m::ConnectedHabitat) = connected_habitat
 graph_function(m::Criticality) = criticality
-graph_function(m::EigMax) = eigmax  
+# Returns a tuple
+graph_function(m::EigMax) = eigmax
+# These return scalars
 graph_function(m::MeanLeastCostKullbackLeiblerDivergence) = mean_lc_kl_divergence
 graph_function(m::MeanKullbackLeiblerDivergence) = mean_kl_divergence
+# These return sparse arrays
+graph_function(m::EdgeBetweennessKweighted) = edge_betweenness_kweighted
+graph_function(m::EdgeBetweennessQweighted) = edge_betweenness_qweighted
 
-compute(m::GraphMeasure, p::AbstractProblem, g::Union{Grid,GridRSP}) = 
-    compute(m, p.distance_transformation, p, g)
-compute(m::GraphMeasure, dts::Union{Tuple,NamedTuple}, p::AbstractProblem, g::Union{Grid,GridRSP}) = 
-    map(dts) do dt
-        compute(m, dt, p, g)
+# Map structs to function keywords, 
+# a bit of a hack until we refactor the rest
+keywords(gm::GraphMeasure, p::AbstractProblem) = 
+    (; _keywords(gm)..., solver=solver(p))
+keywords(gm::ConnectedHabitat, p::AbstractProblem) = 
+    (; _keywords(gm)..., solver=solver(p), approx=connectivity_measure(p).approx) 
+
+# A trait for connectivity requirement
+struct NeedsConnectivity end
+struct NoConnectivity end
+needs_connectivity(::GraphMeasure) = NoConnectivity()
+needs_connectivity(::BetweennessKweighted) = NeedsConnectivity()
+needs_connectivity(::BetweennessKweighted) = NeedsConnectivity()
+needs_connectivity(::EdgeBetweennessKweighted) = NeedsConnectivity()
+needs_connectivity(::EigMax) = NeedsConnectivity()
+needs_connectivity(::ConnectedHabitat) = NeedsConnectivity()
+
+# compute
+# This is where things actually happen
+#
+# Add dispatch on connectivity measure
+compute(gm::GraphMeasure, p::AbstractProblem, g::Union{Grid,GridRSP}) = 
+    compute(needs_connectivity(gm), gm, p, g)
+function compute(::NeedsConnectivity,
+    gm::GraphMeasure, 
+    p::AbstractProblem, 
+    g::Union{Grid,GridRSP}
+)
+    cm = p.connectivity_measure
+    distance_transformation = cm.distance_transformation
+    connectivity_function = ConScape.connectivity_function(cm)
+    # Handle multiple distance transformations
+    if distance_transformation isa NamedTuple
+        map(distance_transformation) do dt
+            graph_function(gm)(g; keywords(m, p)..., distance_transformation=dt, connectivity_function)
+        end
+    else
+        graph_function(gm)(g; keywords(m, p)..., distance_transformation=dt, connectivity_function)
     end
-compute(m::GraphMeasure, distance_transformation, p::AbstractProblem, g::Union{Grid,GridRSP}) = 
-    graph_function(m)(g; keywords(m, distance_transformation, p)...)
+end
+function compute(::NoConnectivity,
+    gm::GraphMeasure, 
+    p::AbstractProblem, 
+    g::Union{Grid,GridRSP}
+) 
+    graph_function(gm)(g; keywords(m, p)...)
+end

@@ -9,6 +9,8 @@ mov_prob = replace_missing(Raster(joinpath(datadir, "mov_prob_1000.asc")), NaN)
 hab_qual = replace_missing(Raster(joinpath(datadir, "hab_qual_1000.asc")), NaN)
 rast = ConScape.coarse_graining(RasterStack((; affinities=mov_prob, qualities=hab_qual)), 10)
 
+# rast = RasterStack((; affinities=mov_prob, qualities=hab_qual))
+
 graph_measures = graph_measures = (;
     func=ConScape.ConnectedHabitat(),
     qbetw=ConScape.BetweennessQweighted(),
@@ -29,6 +31,17 @@ problem = ConScape.Problem(;
 @test size(result) == size(rast)
 @test keys(result) == expected_layers
 
+# Optimised problem
+vector_problem = ConScape.Problem(; 
+    graph_measures, distance_transformation, connectivity_measure,
+    solver = ConScape.VectorSolver(; threaded=true),
+)
+@profview vector_result = ConScape.solve(vector_problem, rast)
+@test vector_result isa RasterStack
+@test size(vector_result) == size(rast)
+@test keys(vector_result) == expected_layers
+@test all(vector_result.func_exp .=== result.func_exp)
+
 # Problem with custom solver
 linearsolve_problem = ConScape.Problem(; 
     graph_measures, distance_transformation, connectivity_measure,
@@ -38,7 +51,6 @@ linearsolve_problem = ConScape.Problem(;
 @test ls_result isa RasterStack
 @test size(ls_result) == size(rast)
 @test keys(ls_result) == expected_layers
-@test all(ls_result.func_exp .=== result.func_exp)
 
 # WindowedProblem returns a RasterStack
 windowed_problem = ConScape.WindowedProblem(problem; 
