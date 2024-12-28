@@ -381,12 +381,8 @@ end
 coarse_graining(rast::AbstractRaster, npix; kw...) =
     rebuild(rast, coarse_graining(parent(rast), npix; kw...))
 function coarse_graining(rast::AbstractRasterStack, npix; kw...)
+    target = _get_target(rast)
     # Get target qualities or qualities
-    target = get(rast, :target_qualities) do
-        get(rast, :qualities) do
-            throw(ArgumentError("No :target_qualities or :qualities layers found"))
-        end
-    end
     target_qualities = coarse_graining(target, npix; kw...)
     return Base.setindex(rast, target_qualities, :target_qualities)
 end
@@ -415,6 +411,13 @@ function coarse_graining(M::AbstractMatrix, npix;
 
     return target_mat
 end
+
+function _get_target(rast::AbstractRasterStack)
+    get(rast, :target_qualities) do
+        get(rast, :qualities) do
+            throw(ArgumentError("No :target_qualities or :qualities layers found"))
+        end
+    end
 
 
 """

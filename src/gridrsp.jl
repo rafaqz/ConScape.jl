@@ -291,7 +291,6 @@ function connected_habitat(grsp::Union{Grid,GridRSP};
     approx::Bool=false)
 
     # Check that distance_transformation function has been passed if no cost function is saved
-    @show distance_transformation connectivity_function
     if distance_transformation === nothing && connectivity_function <: DistanceFunction
         if grsp isa Grid
             throw(ArgumentError("distance_transformation function is required when passing a Grid together with a Distance function"))

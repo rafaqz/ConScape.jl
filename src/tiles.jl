@@ -6,43 +6,21 @@
 Combine multiple compute operations into a single object, 
 to be run over the same windowed grids.
 """
-@kwdef struct WindowedProblem{P,R,M} <: AbstractProblem
+struct WindowedProblem{P} <: AbstractProblem
     problem::P
-    ranges::R
-    mask::M
+    radius::Int
+    overlap::Int
 end
-function WindowedProblem(problem; 
-    target=nothing, 
-    radius,
-    overlap,
-    res=resolution(target),
-)
-    ranges = _get_ranges(res, radius, overlap)
-    mask = _get_mask(target, ranges)
-    WindowedProblem(problem, ranges, mask)
-end
+WindowedProblem(problem; radius, overlap) =
+    WindowedProblem(problem, radius, overlap)
 
-function compute(p::WindowedProblem, rast::RasterStack)
-    outputs = map(p.mask, p.ranges) do m, r
-        m || return missing
-        target = rast[r...]
-        p1 = _initialise(p, target)
-        g = Grid(p1, target)
-        compute(p, g)
-    end
+function solve(wp::WindowedProblem, rast::RasterStack)
+    ranges = _get_ranges(wp, rast)
+    mask = _get_mask(rast, ranges)
+    p = wp.problem
+    output_stacks = [solve(p, rast[rs...]) for (m, rs) in zip(mask, ranges) if m]
     # Return mosaics of outputs
-    return _mosaic_by_measure(p, outputs)
-end
-
-_mosaic_by_measure(p::WindowedProblem, outputs) = _mosaic_measures(p.problem, outputs)
-_mosaic_by_measure(p::Problem, outputs) = _mosaic_measures(p.graph_measures,p, outputs)
-function _mosaic_by_measure(gm::NamedTuple{K}, p::WindowedProblem, outputs) where K
-    map(K) do k
-        to_mosaic = map(outputs) do o
-            o[k]
-        end
-        Rasters.mosaic(sum, to_mosaic)
-    end |> NamedTuple{K}
+    return Rasters.mosaic(sum, output_stacks; to=rast)
 end
 
 # function assess(op::WindowedProblem, g::Grid) 
@@ -65,44 +43,49 @@ end
 Combine multiple compute operations into a single object, 
 to be run over tiles of windowed grids.
 """
-struct StoredProblem{P,R,M}
+struct StoredProblem{P}
     problem::P
-    ranges::R
-    mask::M
+    radius::Int
+    overlap::Int
     path::String
     ext::String
 end
 function StoredProblem(p::AbstractProblem;
-    target::Raster,
-    radius::Real,
-    overlap::Real,
+    radius::Int,
+    overlap::Int,
     path::String,
     ext::String=".tif",
 )
-    res = resolution(target)
-    ranges = _get_ranges(res, radius, overlap)
-    mask = _get_mask(target, ranges)
-    return StoredProblem(w, ranges, mask, path, ext)
+    return StoredProblem(p, radius, overlap, path, ext)
 end
 
-function compute(p::StoredProblem, rast::RasterStack)
-    map(p.ranges, p.mask) do rs, m
-        m || return nothing
-        target = rast[r...]
-        p1 = _initialise(p, target)
-        g = Grid(p1, target)
-        output = compute(p, g)
-        _store(p, output, rs)
-        nothing
+function solve(sp::StoredProblem, rast::RasterStack)
+    ranges = _get_ranges(sp, rast)
+    mask = _get_mask(rast, ranges)
+    for (rs, m) in zip(ranges, mask)
+        m || continue
+        output = solve(sp.problem, rast[rs...])
+        _store(sp, output, rs)
     end
 end
 
-function _store(p::StoredProblem, output::NamedTuple{K}, ranges) where K
-    window_path = mkpath(_window_path(p, ranges))
-    map(K) do k
-        filepath = joinpath(window_path, string(k) * p.file_extension)
-        Rasters.write(filepath, output[k])
-    end
+# Mosaic the stored files to a RasterStack
+function Rasters.mosaic(sp::StoredProblem; 
+    to, lazy=false, filename=nothing, kw...
+)
+    ranges = _get_ranges(sp, to)
+    mask = _get_mask(to, ranges)
+    paths = [_window_path(sp, rs) for (rs, m) in zip(ranges, mask) if m]
+    stacks = [RasterStack(p; lazy, name) for p in paths if isdir(p)]
+
+    return Rasters.mosaic(sum, stacks; to, filename, kw...)
+end
+
+function _store(p::StoredProblem, output::RasterStack{K}, ranges) where K
+    path = mkpath(_window_path(p, ranges))
+    Rasters.write(joinpath(path, ""), output; 
+        ext=p.ext, verbose=false, force=true
+    )
 end
 
 function _window_path(p, ranges)
@@ -111,25 +94,9 @@ function _window_path(p, ranges)
     return joinpath(p.path, window_dirname)
 end
 
-# Mosaic the stored files to a RasterStack
-function Rasters.mosaic(p::StoredProblem; to=nothing, filename=nothing)
-    window_paths = [_window_path(p, r) for (rs, m) in zip(p.ranges, p.mask) if m]
-    K = keys(graph_measures(p))
-    rasters = map(K) do name
-        filepaths = joinpath.(window_paths, (string(name) * p.file_extension,))
-        windows = [Raster(fp; lazy=true, name) for fp in filepaths if isfile(fp)]
-        # Mosaic them all together
-        filename = filename * '_' * name * p.file_extension
-        return Rasters.mosaic(sum, windows; to, filename)
-    end |> NamedTuple{K}
-
-    return RasterStack(rasters)
-end
-
 # Generate a new mask if nested
 _initialise(p::Problem, target) = p
 function _initialise(p::WindowedProblem, target)
-    mask = _get_mask(target, p.ranges)
     WindowedProblem(p.problem, p.ranges, mask)
 end
 function _initialise(p::StoredProblem, target)
@@ -137,24 +104,21 @@ function _initialise(p::StoredProblem, target)
     StoredProblem(p.problem, p.ranges, mask, p.path)
 end
 
-function _get_ranges(res, radius, overlap)
-    # Convert distances to pixels
-    r = floor(Int, radius / res)
-    o = floor(Int, overlap / res)
-    s = r - o # Step between each window corner
+_get_ranges(p::Union{StoredProblem,WindowedProblem}, rast::AbstractRasterStack) = 
+    _get_ranges(size(rast), p.radius, p.overlap)
+function _get_ranges(size::Tuple{Int,Int}, r::Int, overlap::Int)
+    r <= overlap && throw(ArgumentError("radius must be larger than overlap"))
+    s = r - overlap # Step between each window corner
     # Define the corners of each window
-    corners = CartesianIndices(target)[begin:s:end, begin:s:end]
-    # Create an array of ranges for retreiving each window
-    ranges = map(corners) do corner
-        map(corner, size(target)) do i, sz
-            i:min(sz, i + r)
-        end
-    end
-    return ranges
+    corners = CartesianIndices(size)[begin:s:end, begin:s:end]
+    # Create an iterator of ranges for retreiving each window
+    return (map((i, sz) -> i:min(sz, i + r), Tuple(c), size) for c in corners)
 end
 
-_get_mask(target::Nothing, ranges) = nothing
-function _generate_mask(target, ranges)
+_get_mask(::Nothing, ranges) = nothing
+_get_mask(rast::AbstractRasterStack, ranges) =
+    _get_mask(_get_target(rast), ranges)
+function _get_mask(target::AbstractRaster, ranges)
     # Create a mask to skip tiles that have no target cells
     map(ranges) do I
         # Get a window view
@@ -164,3 +128,5 @@ function _generate_mask(target, ranges)
         any(x -> !isnan(x) && x > zero(x), window)
     end
 end
+
+resolution(rast) = abs(step(lookup(rast, X)))
