@@ -21,20 +21,17 @@ Solve all operations on a fully materialised Z matrix.
 This is fast but memory inneficient for CPUS, and isn't threaded.
 But may be best for GPUs using CuSSP.jl ?
 """
-struct MatrixSolver <: Solver end
+@kwdef struct MatrixSolver <: Solver 
+    check::Bool = true
+end
 
 # Materialise the whole rhs matrix
-function solve(m::MatrixSolver, cm::FundamentalMeasure, p::AbstractProblem, g::Grid) 
-    # Legacy code... but maybe materialising is faster for CUDSS?
-    Pref = _Pref(g.affinities)
-    W    = _W(Pref, cm.θ, g.costmatrix)
-    Z    = (I - W) \ Matrix(sparse(g.targetnodes,
-                                 1:length(g.targetnodes),
-                                 1.0,
-                                 size(g.costmatrix, 1),
-                                 length(g.targetnodes)))
+function solve(s::MatrixSolver, cm::FundamentalMeasure, p::AbstractProblem, g::Grid) 
+    (; A, B, Pref, W) = setup_sparse_problem(g, cm)
+    # Nearly all the work and allocation happens here
+    Z = A \ Matrix(B)
     # Check that values in Z are not too small:
-    if minimum(Z) * minimum(nonzeros(g.costmatrix .* W)) == 0
+    if s.check && minimum(Z) * minimum(nonzeros(g.costmatrix .* W)) == 0
         @warn "Warning: Z-matrix contains too small values, which can lead to inaccurate results! Check that the graph is connected or try decreasing θ."
     end
     grsp = GridRSP(g, cm.θ, Pref, W, Z)
@@ -85,18 +82,7 @@ LinearSolver(args...; threaded=false, kw...) = LinearSolver(args, kw, threaded)
 
 # Use an iterative solver so the grid is not materialised
 function solve(s::LinearSolver, cm::FundamentalMeasure, p::AbstractProblem, g::Grid)
-    # solve Z column by column
-    Pref = _Pref(g.affinities)
-    W = _W(Pref, cm.θ, g.costmatrix)
-    # Sparse lhs
-    A = I - W
-    # Sparse diagonal rhs matrix
-    B = sparse(g.targetnodes,
-        1:length(g.targetnodes),
-        1.0,
-        size(g.costmatrix, 1),
-        length(g.targetnodes),
-    )
+    (; A, B) = setup_sparse_problem(g, cm)
     # Dense rhs column
     b_init = zeros(eltype(A), size(B, 1))
     # Define and initialise the linear problem
@@ -152,4 +138,44 @@ function solve(s::LinearSolver, cm::FundamentalMeasure, p::AbstractProblem, g::G
         compute(gm, p, grsp)
     end 
     return _merge_to_stack(results)
+end
+
+
+# Utils
+
+function setup_sparse_problem(g::Grid, cm::FundamentalMeasure)
+    Pref = _Pref(g.affinities)
+    W = _W(Pref, cm.θ, g.costmatrix)
+    # Sparse lhs
+    A = I - W
+    # Sparse diagonal rhs matrix
+    B = sparse(g.targetnodes,
+        1:length(g.targetnodes),
+        1.0,
+        size(g.costmatrix, 1),
+        length(g.targetnodes),
+    )
+    return (; A, B, Pref, W)
+end
+
+# We may have multiple distance_measures per
+# graph_measure, but we want a single RasterStack.
+# So we merge the names of the two layers
+function _merge_to_stack(nt::NamedTuple{K}) where K
+    unique_nts = map(K) do k
+        gm = nt[k]
+        if gm isa NamedTuple
+            # Combine outer and inner names with an underscore
+            joinedkeys = map(keys(gm)) do k_inner
+                Symbol(k, :_, k_inner)
+            end
+            # And rename the NamedTuple
+            NamedTuple{joinedkeys}(values(gm))
+        else
+            # We keep the name as is
+            NamedTuple{(k,)}((gm,))
+        end
+    end
+    # merge unique layers into a sinlge RasterStack
+    return RasterStack(merge(unique_nts...))
 end

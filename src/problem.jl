@@ -59,28 +59,6 @@ solver(p::Problem) = p.solver
 solve(p::Problem, rast::RasterStack) = solve(p, Grid(p, rast))
 solve(p::Problem, g::Grid) = solve(p.solver, connectivity_measure(p), p, g)
 
-# We may have multiple distance_measures per
-# graph_measure, but we want a single RasterStack.
-# So we merge the names of the two layers
-function _merge_to_stack(nt::NamedTuple{K}) where K
-    unique_nts = map(K) do k
-        gm = nt[k]
-        if gm isa NamedTuple
-            # Combine outer and inner names with an underscore
-            joinedkeys = map(keys(gm)) do k_inner
-                Symbol(k, :_, k_inner)
-            end
-            # And rename the NamedTuple
-            NamedTuple{joinedkeys}(values(gm))
-        else
-            # We keep the name as is
-            NamedTuple{(k,)}((gm,))
-        end
-    end
-    # merge unique layers into a sinlge RasterStack
-    return RasterStack(merge(unique_nts...))
-end
-
 # @kwdef struct ComputeAssesment{P,M,T}
 #     problem::P
 #     mem_stats::M
