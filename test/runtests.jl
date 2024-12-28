@@ -1,6 +1,10 @@
 using ConScape, Test, SparseArrays
 using Rasters, ArchGDAL, Plots
 
+inclued("problem.jl")
+
+# TODO reorganise this into separate files
+
 datadir = joinpath(dirname(pathof(ConScape)), "..", "data")
 _tempdir = mkdir(tempname())
 

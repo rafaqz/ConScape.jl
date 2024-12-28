@@ -418,6 +418,7 @@ function _get_target(rast::AbstractRasterStack)
             throw(ArgumentError("No :target_qualities or :qualities layers found"))
         end
     end
+end
 
 
 """
