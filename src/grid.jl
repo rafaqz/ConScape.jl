@@ -1,31 +1,17 @@
-abstract type Transformation end
-struct MinusLog     <: Transformation end
-struct ExpMinus     <: Transformation end
-struct Inv          <: Transformation end
-struct OddsAgainst  <: Transformation end
-struct OddsFor      <: Transformation end
-
-(::MinusLog)(x::Number)     = -log(x)
-(::ExpMinus)(x::Number)     = exp(-x)
-(::Inv)(x::Number)          = inv(x)
-(::OddsAgainst)(x::Number)  = inv(x) - 1
-(::OddsFor)(x::Number)      = x/(1 - x)
-
-Base.inv(::MinusLog)     = ExpMinus()
-Base.inv(::ExpMinus)     = MinusLog()
-Base.inv(::Inv)          = Inv()
-Base.inv(::OddsAgainst)  = OddsFor()
-Base.inv(::OddsFor)      = OddsAgainst()
-
-struct Grid
+struct Grid{D<:Union{Tuple,Nothing},SQ,TQ}
     nrows::Int
     ncols::Int
     affinities::SparseMatrixCSC{Float64,Int}
     costfunction::Union{Nothing,Transformation}
     costmatrix::SparseMatrixCSC{Float64,Int}
     id_to_grid_coordinate_list::Vector{CartesianIndex{2}}
-    source_qualities::Matrix{Float64}
-    target_qualities::AbstractMatrix{Float64}
+    source_qualities::SQ
+    target_qualities::TQ
+    targetidx::Vector{CartesianIndex{2}}
+    targetnodes::Vector{Int}
+    qs::Vector{Float64}
+    qt::Vector{Float64}
+    dims::D
 end
 
 """
@@ -47,8 +33,8 @@ affinity and cost matrices will be pruned to exclude unreachable nodes.
 function Grid(nrows::Integer,
               ncols::Integer;
               affinities=nothing,
-              qualities::Matrix=ones(nrows, ncols),
-              source_qualities::Matrix=qualities,
+              qualities::AbstractMatrix=ones(nrows, ncols),
+              source_qualities::AbstractMatrix=qualities,
               target_qualities::AbstractMatrix=qualities,
               costs::Union{Transformation,SparseMatrixCSC{Float64,Int}}=MinusLog(),
               prune=true)
@@ -62,8 +48,8 @@ function Grid(nrows::Integer,
         throw(ArgumentError("grid size ($nrows, $ncols) is incompatible with size of affinity matrix ($n, $n)"))
     end
 
-    _source_qualities = convert(Matrix{Float64}        , source_qualities)
-    _target_qualities = convert(AbstractMatrix{Float64}, target_qualities)
+    _source_qualities = convert(Matrix{Float64}        , _unwrap(source_qualities))
+    _target_qualities = convert(AbstractMatrix{Float64}, _unwrap(target_qualities))
 
     # Prune
     # id_to_grid_coordinate_list = if prune
@@ -74,25 +60,31 @@ function Grid(nrows::Integer,
     #     _affinities = affinities
     #     vec(CartesianIndices((nrows, ncols)))
     # end
-    id_to_grid_coordinate_list = vec(CartesianIndices((nrows, ncols)))
+    id_to_grid_coordinate_list = _id_gc_list(nrows, ncols)
 
     costfunction, costmatrix = if costs isa Transformation
         costs, mapnz(costs, affinities)
     else
-        if nrows*ncols != LinearAlgebra.checksquare(costs)
+        if nrows * ncols != LinearAlgebra.checksquare(costs)
             n = size(costs, 1)
             throw(ArgumentError("grid size ($nrows, $ncols) is incompatible with size of cost matrix ($n, $n)"))
         end
         nothing, costs
     end
 
-    if any(t -> t < 0, nonzeros(costmatrix))
-        throw(ArgumentError("The cost graph can have only non-negative edge weights. Perhaps you should change the cost function?"))
-    end
+    # if any(t -> t < 0, nonzeros(costmatrix))
+    #     throw(ArgumentError("The cost graph can have only non-negative edge weights. Perhaps you should change the cost function?"))
+    # end
+    # cost_digraph = SimpleDiGraph(costmatrix)
+    # affinity_digraph = SimpleDiGraph(affinities)
 
-    if ne(difference(SimpleDiGraph(costmatrix), SimpleDiGraph(affinities))) > 0
-        throw(ArgumentError("cost graph contains edges not present in the affinity graph"))
-    end
+    # if ne(difference(cost_digraph, affinity_digraph)) > 0
+        # throw(ArgumentError("cost graph contains edges not present in the affinity graph"))
+    # end
+
+    targetidx, targetnodes = _targetidx_and_nodes(target_qualities, id_to_grid_coordinate_list)
+    qs = [_source_qualities[i] for i in id_to_grid_coordinate_list]
+    qt = [_target_qualities[i] for i in id_to_grid_coordinate_list ∩ targetidx]
 
     g = Grid(
         nrows,
@@ -103,6 +95,11 @@ function Grid(nrows::Integer,
         id_to_grid_coordinate_list,
         _source_qualities,
         _target_qualities,
+        targetidx,
+        targetnodes,
+        qs,
+        qt,
+        dims(source_qualities),
     )
 
     if prune
@@ -111,69 +108,95 @@ function Grid(nrows::Integer,
         return g
     end
 end
+function Grid(rast::RasterStack; 
+    qualities=get(rast, :qualities) do 
+        ones(size(rast))
+    end,
+    affinities=let
+        affinities_raster = get(rast, :affinities, nothing) 
+        ConScape.graph_matrix_from_raster(affinities_raster)
+    end,
+    source_qualities=get(rast, :source_qualities, qualities),
+    target_qualities=get(rast, :target_qualities, qualities), 
+    kw...
+)
+    Grid(size(rast)...; affinities, qualities, source_qualities, target_qualities, kw...)  
+end
+# TODO move functions like MinusLog to problems and pass in here
+Grid(p::AbstractProblem, rast::RasterStack; kw...) = 
+    Grid(rast; costs=costs(p), prune=prune(p), kw...)
 
 Base.size(g::Grid) = (g.nrows, g.ncols)
+DimensionalData.dims(g::Grid) = g.dims
 
 function Base.show(io::IO, ::MIME"text/plain", g::Grid)
     print(io, summary(g), " of size ", g.nrows, "x", g.ncols)
 end
+# function Base.show(io::IO, ::MIME"text/html", g::Grid)
+#     t = string(summary(g), " of size ", g.nrows, "x", g.ncols)
+#     write(io, "<h4>$t</h4>")
+#     write(io, "<table><tr><td>Affinities</br>")
+#     show(io, MIME"text/html"(), plot_outdegrees(g))
+#     write(io, "</td></tr></table>")
+#     if g.source_qualities === g.target_qualities
+#         write(io, "<table><tr><td>Qualities</td></tr></table>")
+#         show(io, MIME"text/html"(), heatmap(g.source_qualities, yflip=true))
+#     else
+#         write(io, "<table><tr><td>Source qualities")
+#         show(io, MIME"text/html"(), heatmap(g.source_qualities, yflip=true))
+#         write(io, "</td><td>Target qualities")
+#         show(io, MIME"text/html"(), heatmap(Matrix(g.target_qualities), yflip=true))
+#         write(io, "</td></tr></table>")
+#     end
+# end
 
-function Base.show(io::IO, ::MIME"text/html", g::Grid)
-    t = string(summary(g), " of size ", g.nrows, "x", g.ncols)
-    write(io, "<h4>$t</h4>")
-    write(io, "<table><tr><td>Affinities</br>")
-    show(io, MIME"text/html"(), plot_outdegrees(g))
-    write(io, "</td></tr></table>")
-    if g.source_qualities === g.target_qualities
-        write(io, "<table><tr><td>Qualities</td></tr></table>")
-        show(io, MIME"text/html"(), heatmap(g.source_qualities, yflip=true))
-    else
-        write(io, "<table><tr><td>Source qualities")
-        show(io, MIME"text/html"(), heatmap(g.source_qualities, yflip=true))
-        write(io, "</td><td>Target qualities")
-        show(io, MIME"text/html"(), heatmap(Matrix(g.target_qualities), yflip=true))
-        write(io, "</td></tr></table>")
-    end
-end
-
+_id_gc_list(nrows, ncols) = vec(collect(CartesianIndices((nrows, ncols))))
+_unwrap(R::Raster) = parent(R)
+_unwrap(R::AbstractMatrix) = R
 # Compute a vector of the cartesian indices of nonzero target qualities and
 # the corresponding node id corresponding to the indices
-_targetidx(q::Matrix, grididxs::Vector) = grididxs
-_targetidx(q::SparseMatrixCSC, grididxs::Vector) =
+_targetidx(q::AbstractMatrix, grididxs::AbstractVector) = grididxs
+_targetidx(q::Raster, grididxs::AbstractVector) = _targetidx(parent(q), grididxs)
+_targetidx(q::SparseMatrixCSC, grididxs::AbstractVector) =
     CartesianIndex.(findnz(q)[1:2]...) ∩ grididxs
 
-function _targetidx_and_nodes(g::Grid)
-    targetidx = _targetidx(g.target_qualities, g.id_to_grid_coordinate_list)
+_targetidx_and_nodes(g::Grid) = 
+    _targetidx_and_nodes(g.target_qualities, g.id_to_grid_coordinate_list)
+function _targetidx_and_nodes(target_qualities, id_to_grid_coordinate_list)
+    targetidx = _targetidx(target_qualities, id_to_grid_coordinate_list)
+    # targetnodes = Vector{Int}(undef, length(targetidx))
+    # n = findfirst(==(id_to_grid_coordinate_list[1]), targetnodes)
+    # targetnodes[1] = n
+    # for i in eachindex(id_to_grid_coordinate_list)[2:end]
+        # findnext(==(id_to_grid_coordinate_list[i]), targetnodes, n)
+    # end
     targetnodes = findall(
         t -> t ∈ targetidx,
-        g.id_to_grid_coordinate_list)
+        id_to_grid_coordinate_list)
     return targetidx, targetnodes
 end
 
-function plot_values(g::Grid, values::Vector; kwargs...)
-    canvas = fill(NaN, g.nrows, g.ncols)
-    for (i,v) in enumerate(values)
-        canvas[g.id_to_grid_coordinate_list[i]] = v
+function _fill_matrix(values, g) 
+    M = fill(NaN, g.nrows, g.ncols)
+    for (i, v) in enumerate(values)
+        M[g.id_to_grid_coordinate_list[i]] = v
     end
-    heatmap(canvas, yflip=true, axis=nothing, border=:none, aspect_ratio=:equal; kwargs...)
+    return M
 end
 
-function plot_outdegrees(g::Grid; kwargs...)
+function Raster(values::AbstractVector, g::Grid; kwargs...)
+    isnothing(dims(g)) && throw(ArgumentError("Grid dims are `nothing` - it was not initialised with a Raster"))
+    return Raster(_fill_matrix(values, g), dims(g); kwargs...)
+end
+
+function outdegrees(g::Grid)
     values = sum(g.affinities, dims=2)
-    canvas = fill(NaN, g.nrows, g.ncols)
-    for (i,v) in enumerate(values)
-        canvas[g.id_to_grid_coordinate_list[i]] = v
-    end
-    heatmap(canvas, yflip=true, axis=nothing, border=:none; kwargs...)
+    _maybe_raster(_fill_matrix(values, g), g)
 end
 
-function plot_indegrees(g::Grid; kwargs...)
+function indegrees(g::Grid; kwargs...)
     values = sum(g.affinities, dims=1)
-    canvas = fill(NaN, g.nrows, g.ncols)
-    for (i,v) in enumerate(values)
-        canvas[g.id_to_grid_coordinate_list[i]] = v
-    end
-    heatmap(canvas, yflip=true, axis=nothing, border=:none; kwargs...)
+    _maybe_raster(_fill_matrix(values, g), g)
 end
 
 """
@@ -206,38 +229,49 @@ will have the same size as the input `Grid` but only nodes associated with the
 largest subgraph of the affinities will be active.
 """
 function largest_subgraph(g::Grid)
-    # Convert cost matrix to graph
+    # Convert cost matrix to graph, todo: is `permute=false` needed
     graph = SimpleWeightedDiGraph(g.costmatrix, permute=false)
 
     # Find the subgraphs
     scc = strongly_connected_components(graph)
 
-    @info "cost graph contains $(length(scc)) strongly connected subgraphs"
+    # @info "cost graph contains $(length(scc)) strongly connected subgraphs"
 
     # Find the largest subgraph
-    i = argmax(length.(scc))
+    _, i = findmax(length, scc)
 
     # extract node list and sort it
     scci = sort(scc[i])
 
-    ndiffnodes = size(g.costmatrix, 1) - length(scci)
-    if ndiffnodes > 0
-        @info "removing $ndiffnodes nodes from affinity and cost graphs"
-    end
+    # ndiffnodes = size(g.costmatrix, 1) - length(scci)
+    # if ndiffnodes > 0
+        # @info "removing $ndiffnodes nodes from affinity and cost graphs"
+    # end
 
     # Extract the adjacency matrix of the largest subgraph
     affinities = g.affinities[scci, scci]
     # affinities = convert(SparseMatrixCSC{Float64,Int}, graph[scci])
 
+    costmatrix = g.costfunction === nothing ? g.costmatrix[scci, scci] : mapnz(g.costfunction, affinities)
+    id_to_grid_coordinate_list = g.id_to_grid_coordinate_list[scci]
+    targetidx, targetnodes = _targetidx_and_nodes(g.target_qualities, id_to_grid_coordinate_list)
+    qs = [g.source_qualities[i] for i in id_to_grid_coordinate_list]
+    qt = [g.target_qualities[i] for i in id_to_grid_coordinate_list ∩ targetidx]
     return Grid(
         g.nrows,
         g.ncols,
         affinities,
         g.costfunction,
-        g.costfunction === nothing ? g.costmatrix[scci, scci] : mapnz(g.costfunction, affinities),
-        g.id_to_grid_coordinate_list[scci],
+        costmatrix,
+        id_to_grid_coordinate_list,
         g.source_qualities,
-        g.target_qualities)
+        g.target_qualities,
+        targetidx,
+        targetnodes,
+        qs,
+        qt,
+        g.dims,
+    )
 end
 
 """
@@ -275,13 +309,12 @@ function least_cost_distance(g::Grid; θ::Nothing=nothing, approx::Bool=false)
     if approx
         throw(ArgumentError("no approximate algorithm is available for this distance function"))
     end
-    targets = ConScape._targetidx_and_nodes(g)[1]
-    @progress vec_of_vecs = [_least_cost_distance(g, target) for target in targets]
+    targets = g.targetidx
+    @progress vec_of_vecs = [least_cost_distance(g, target) for target in targets]
 
     return reduce(hcat, vec_of_vecs)
 end
-
-function _least_cost_distance(g::Grid, target::CartesianIndex{2})
+function least_cost_distance(g::Grid, target::CartesianIndex{2})
     graph = SimpleWeightedDiGraph(g.costmatrix)
     targetnode = findfirst(isequal(target), g.id_to_grid_coordinate_list)
     distvec = dijkstra_shortest_paths(graph, targetnode).dists
@@ -301,15 +334,14 @@ end
 
 A helper-function, used by coarse_graining, that computes the sum of pixels within a npix neighborhood around the target rc.
 """
-function sum_neighborhood(g, rc, npix)
+sum_neighborhood(g, rc, npix) = sum_neighborhood(g.target_qualities, rc, npix)
+function sum_neighborhood(target_qualities::AbstractMatrix, rc, npix)
     getrows = (rc[1] - floor(Int, npix/2)):(rc[1] + (ceil(Int, npix/2) - 1))
     getcols = (rc[2] - floor(Int, npix/2)):(rc[2] + (ceil(Int, npix/2) - 1))
     # pixels outside of the landscape are encoded with NaNs but we don't want
     # the NaNs to propagate to the coarse grained values
-    return sum(t -> isnan(t) ? 0.0 : t, g.target_qualities[getrows, getcols])
+    return sum(t -> isnan(t) ? 0.0 : t, target_qualities[getrows, getcols])
 end
-
-
 
 """
     coarse_graining(g::Grid, npix::Integer)::Array
@@ -317,26 +349,50 @@ end
 Creates a sparse matrix of target qualities for the landmarks based on merging npix pixels into the center pixel.
 """
 function coarse_graining(g, npix)
-    getrows = (floor(Int, npix/2)+1):npix:(g.nrows-ceil(Int, npix/2)+1)
-    getcols = (floor(Int, npix/2)+1):npix:(g.ncols-ceil(Int, npix/2)+1)
+    coarse_graining(g.target_qualities, npix; 
+        id_to_grid_coordinate_list=g.id_to_grid_coordinate_list
+    )
+end
+coarse_graining(rast::AbstractRaster, npix; kw...) =
+    rebuild(rast, coarse_graining(parent(rast), npix; kw...))
+function coarse_graining(rast::AbstractRasterStack, npix; kw...)
+    target = _get_target(rast)
+    # Get target qualities or qualities
+    target_qualities = coarse_graining(target, npix; kw...)
+    return Base.setindex(rast, target_qualities, :target_qualities)
+end
+function coarse_graining(M::AbstractMatrix, npix;
+    id_to_grid_coordinate_list=_id_gc_list(size(M)...)
+)
+    nrows, ncols = size(M)
+    getrows = (floor(Int, npix/2)+1):npix:(nrows-ceil(Int, npix/2)+1)
+    getcols = (floor(Int, npix/2)+1):npix:(ncols-ceil(Int, npix/2)+1)
     coarse_target_rc = Base.product(getrows, getcols)
     coarse_target_ids = vec(
         [
             findfirst(
                 isequal(CartesianIndex(ij)),
-                g.id_to_grid_coordinate_list
+                id_to_grid_coordinate_list
             ) for ij in coarse_target_rc
         ]
     )
     coarse_target_rc = [ij for ij in coarse_target_rc if !ismissing(ij)]
     filter!(!ismissing, coarse_target_ids)
-    V = [sum_neighborhood(g, ij, npix) for ij in coarse_target_rc]
+    V = [sum_neighborhood(M, ij, npix) for ij in coarse_target_rc]
     I = first.(coarse_target_rc)
     J = last.(coarse_target_rc)
-    target_mat = sparse(I, J, V, g.nrows, g.ncols)
+    target_mat = sparse(I, J, V, nrows, ncols)
     target_mat = dropzeros(target_mat)
 
     return target_mat
+end
+
+function _get_target(rast::AbstractRasterStack)
+    get(rast, :target_qualities) do
+        get(rast, :qualities) do
+            throw(ArgumentError("No :target_qualities or :qualities layers found"))
+        end
+    end
 end
 
 

@@ -1,3 +1,4 @@
+
 struct GridRSP
     g::Grid
     θ::Float64
@@ -11,61 +12,55 @@ end
 
 Construct a GridRSP from a `g::Grid` based on the inverse temperature parameter `θ::Real`.
 """
-function GridRSP(g::Grid; θ=nothing)
-
+function GridRSP(g::Grid; θ=nothing, verbose=true)
     Pref = _Pref(g.affinities)
     W    = _W(Pref, θ, g.costmatrix)
 
     @debug("Computing fundamental matrix of non-absorbing paths (Z). Please be patient...")
-    targetidx, targetnodes = _targetidx_and_nodes(g)
-    Z    = (I - W)\Matrix(sparse(targetnodes,
-                                 1:length(targetnodes),
+    Z    = (I - W)\Matrix(sparse(g.targetnodes,
+                                 1:length(g.targetnodes),
                                  1.0,
                                  size(g.costmatrix, 1),
-                                 length(targetnodes)))
+                                 length(g.targetnodes)))
     # Check that values in Z are not too small:
-    if minimum(Z)*minimum(nonzeros(g.costmatrix .* W)) == 0
+    verbose && if minimum(Z)*minimum(nonzeros(g.costmatrix .* W)) == 0
         @warn "Warning: Z-matrix contains too small values, which can lead to inaccurate results! Check that the graph is connected or try decreasing θ."
     end
 
     return GridRSP(g, θ, Pref, W, Z)
 end
 
+_get_grid(grsp::GridRSP) = grsp.g
+_get_grid(g::Grid)       = g
+
 function Base.show(io::IO, ::MIME"text/plain", grsp::GridRSP)
     print(io, summary(grsp), " of size ", grsp.g.nrows, "x", grsp.g.ncols)
 end
-
-function Base.show(io::IO, ::MIME"text/html", grsp::GridRSP)
-    t = string(summary(grsp), " of size ", grsp.g.nrows, "x", grsp.g.ncols)
-    write(io, "<h4>$t</h4>")
-    show(io, MIME"text/html"(), plot_outdegrees(grsp.g))
-end
+# function Base.show(io::IO, ::MIME"text/html", grsp::GridRSP)
+    # t = string(summary(grsp), " of size ", grsp.g.nrows, "x", grsp.g.ncols)
+    # write(io, "<h4>$t</h4>")
+    # show(io, MIME"text/html"(), grsp.g))
+# end
+DimensionalData.dims(grsp::GridRSP) = dims(grsp.g)
 
 """
     betweenness_qweighted(grsp::GridRSP)::Matrix{Float64}
 
 Compute RSP betweenness of all nodes weighted by source and target qualities.
 """
-function betweenness_qweighted(grsp::GridRSP)
+function betweenness_qweighted(grsp::Union{GridRSP,NamedTuple}; 
+    output=fill(NaN, g.nrows, g.ncols),
+    kw...
+)
+    g = grsp.g
+    betvec = RSP_betweenness_qweighted(grsp.W, grsp.Z, g.qs, g.qt, g.targetnodes; kw...)
+    coordinate_list = g.id_to_grid_coordinate_list
 
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-
-    betvec = RSP_betweenness_qweighted(
-        grsp.W,
-        grsp.Z,
-        [grsp.g.source_qualities[i] for i in grsp.g.id_to_grid_coordinate_list],
-        [grsp.g.target_qualities[i] for i in grsp.g.id_to_grid_coordinate_list ∩ targetidx],
-        targetnodes)
-
-    bet = fill(NaN, grsp.g.nrows, grsp.g.ncols)
     for (i, v) in enumerate(betvec)
-        bet[grsp.g.id_to_grid_coordinate_list[i]] = v
+        output[coordinate_list[i]] += v
     end
-
-    return bet
+    return _maybe_raster(output, grsp)
 end
-
-
 
 """
     edge_betweenness_qweighted(grsp::GridRSP)::Matrix{Float64}
@@ -73,20 +68,10 @@ end
 Compute RSP betweenness of all edges weighted by source and target qualities. Returns a
 sparse matrix where element (i,j) is the betweenness of edge (i,j).
 """
-function edge_betweenness_qweighted(grsp::GridRSP)
-
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-
-    betmatrix = RSP_edge_betweenness_qweighted(
-        grsp.W,
-        grsp.Z,
-        [grsp.g.source_qualities[i] for i in grsp.g.id_to_grid_coordinate_list],
-        [grsp.g.target_qualities[i] for i in grsp.g.id_to_grid_coordinate_list ∩ targetidx],
-        targetnodes)
-
-    return betmatrix
+function edge_betweenness_qweighted(grsp::Union{GridRSP,NamedTuple}; kw...)
+    g = grsp.g
+    return RSP_edge_betweenness_qweighted(grsp.W, grsp.Z, g.qs, g.qt, g.targetnodes; kw...)
 end
-
 
 """
     betweenness_kweighted(grsp::GridRSP;
@@ -94,128 +79,116 @@ end
         distance_transformation=inv(grsp.g.costfunction),
         diagvalue=nothing])::SparseMatrixCSC{Float64,Int}
 
-Compute RSP betweenness of all nodes weighted with proximities computed with respect to the distance/proximity measure defined by `connectivity_function`. Optionally, an inverse cost function can be passed. The function will be applied elementwise to the matrix of distances to convert it to a matrix of proximities. If no inverse cost function is passed the the inverse of the cost function is used for the conversion of distances.
+Compute RSP betweenness of all nodes weighted with proximities computed with 
+respect to the distance/proximity measure defined by `connectivity_function`. 
+Optionally, an inverse cost function can be passed. The function will be applied 
+elementwise to the matrix of distances to convert it to a matrix of proximities. 
+If no inverse cost function is passed the the inverse of the cost function is 
+used for the conversion of distances.
 
-The optional `diagvalue` element specifies which value to use for the diagonal of the matrix of proximities, i.e. after applying the inverse cost function to the matrix of distances. When nothing is specified, the diagonal elements won't be adjusted.
+The optional `diagvalue` element specifies which value to use for the diagonal 
+of the matrix of proximities, i.e. after applying the inverse cost function to the 
+matrix of distances. When nothing is specified, the diagonal elements won't be adjusted.
 """
-function betweenness_kweighted(grsp::GridRSP;
-    connectivity_function=expected_cost,
-    distance_transformation=nothing,
-    diagvalue=nothing)
-
-    # Check that distance_transformation function has been passed if no cost function is saved
-    if distance_transformation === nothing && connectivity_function <: DistanceFunction
-        if grsp.g.costfunction === nothing
-            throw(ArgumentError("no distance_transformation function supplied and cost matrix in GridRSP isn't based on a cost function."))
-        else
-            distance_transformation = inv(grsp.g.costfunction)
-        end
+function betweenness_kweighted(grsp::Union{GridRSP,NamedTuple}; 
+    output=fill(NaN, size(grsp.g)),
+    proximities=nothing,
+    kw...
+)
+    g = grsp.g
+    if isnothing(proximities)
+        proximities = _computeproximities(grsp; kw...)
     end
 
-    proximities = connectivity_function(grsp)
+    betvec = RSP_betweenness_kweighted(grsp.W, grsp.Z, g.qs, g.qt, proximities, g.targetnodes; kw...)
+    coordinate_list = g.id_to_grid_coordinate_list
+    output[coordinate_list] .+= betvec
 
-    if connectivity_function <: DistanceFunction
-        map!(distance_transformation, proximities, proximities)
-    end
-
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-
-    if diagvalue !== nothing
-        for (j, i) in enumerate(targetnodes)
-            proximities[i, j] = diagvalue
-        end
-    end
-
-    betvec = RSP_betweenness_kweighted(
-        grsp.W,
-        grsp.Z,
-        [grsp.g.source_qualities[i] for i in grsp.g.id_to_grid_coordinate_list],
-        [grsp.g.target_qualities[i] for i in grsp.g.id_to_grid_coordinate_list ∩ targetidx],
-        proximities,
-        targetnodes)
-
-    bet = fill(NaN, grsp.g.nrows, grsp.g.ncols)
-    for (i, v) in enumerate(betvec)
-        bet[grsp.g.id_to_grid_coordinate_list[i]] = v
-    end
-
-    return bet
+    return _maybe_raster(output, grsp)
 end
-
-
 
 """
     edge_betweenness_kweighted(grsp::GridRSP; [distance_transformation=inv(grsp.g.costfunction), diagvalue=nothing])::SparseMatrixCSC{Float64,Int}
 
-    Compute RSP betweenness of all edges weighted by qualities of source s and target t and the proximity between s and t. Returns a
-    sparse matrix where element (i,j) is the betweenness of edge (i,j).
+    Compute RSP betweenness of all edges weighted by qualities of source s and target t and the proximity between s and t. Returns a sparse matrix where element (i,j) is the betweenness of edge (i,j).
 
-    The optional `diagvalue` element specifies which value to use for the diagonal of the matrix
     of proximities, i.e. after applying the inverse cost function to the matrix of expected costs.
     When nothing is specified, the diagonal elements won't be adjusted.
 """
-function edge_betweenness_kweighted(grsp::GridRSP; distance_transformation=inv(grsp.g.costfunction), diagvalue=nothing)
-
+function edge_betweenness_kweighted(grsp::Union{GridRSP,NamedTuple}; 
+    proximities=nothing, 
+    distance_transformation=nothing,
+    diagvalue=nothing, 
+    kw...
+)
+    if isnothing(distance_transformation) 
+        distance_transformation = inv(grsp.g.costfunction)
+    end
+    # TODO why does this only use `expected_cost`?
+    g = grsp.g
+    # S = map(distance_transformation, expected_cost(grsp))
+    # _maybe_set_diagonal!(S, g.targetnodes, diagvalue)
     proximities = map(distance_transformation, expected_cost(grsp))
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
 
     if diagvalue !== nothing
-        for (j, i) in enumerate(targetnodes)
+        for (j, i) in enumerate(g.targetnodes)
             proximities[i, j] = diagvalue
         end
     end
 
-
-    betmatrix = RSP_edge_betweenness_kweighted(
-        grsp.W,
-        grsp.Z,
-        [grsp.g.source_qualities[i] for i in grsp.g.id_to_grid_coordinate_list],
-        [grsp.g.target_qualities[i] for i in grsp.g.id_to_grid_coordinate_list ∩ targetidx],
-        proximities,
-        targetnodes)
-
+    betmatrix = RSP_edge_betweenness_kweighted(grsp.W, grsp.Z, g.qs, g.qt, proximities, g.targetnodes; kw...)
     return betmatrix
 end
-
-
 
 """
     expected_cost(grsp::GridRSP)::Matrix{Float64}
 
 Compute RSP expected costs from all nodes.
 """
-function expected_cost(grsp::GridRSP)
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-    return RSP_expected_cost(grsp.W, grsp.g.costmatrix, grsp.Z, targetnodes)
-end
+expected_cost(grsp::Union{GridRSP,NamedTuple}; kw...) =
+    RSP_expected_cost(grsp.W, grsp.g.costmatrix, grsp.Z, grsp.g.targetnodes; kw...)
 
-function free_energy_distance(grsp::GridRSP)
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-    return RSP_free_energy_distance(grsp.Z, grsp.θ, targetnodes)
-end
+free_energy_distance(grsp::Union{GridRSP,NamedTuple}; kw...) =
+    RSP_free_energy_distance(grsp.Z, grsp.θ, grsp.g.targetnodes; kw...)
 
-function survival_probability(grsp::GridRSP)
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-    return RSP_survival_probability(grsp.Z, grsp.θ, targetnodes)
-end
+survival_probability(grsp::Union{GridRSP,NamedTuple}; kw...) =
+    RSP_survival_probability(grsp.Z, grsp.θ, grsp.g.targetnodes; kw...)
 
-function power_mean_proximity(grsp::GridRSP)
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-    return RSP_power_mean_proximity(grsp.Z, grsp.θ, targetnodes)
-end
+power_mean_proximity(grsp::Union{GridRSP,NamedTuple}; kw...) =
+    RSP_power_mean_proximity(grsp.Z, grsp.θ, grsp.g.targetnodes; kw...)
 
-least_cost_distance(grsp::GridRSP) = least_cost_distance(grsp.g)
+least_cost_distance(grsp::Union{GridRSP,NamedTuple}; kw...) = least_cost_distance(grsp.g; kw...)
 
 """
     mean_kl_divergence(grsp::GridRSP)::Float64
 
 Compute the mean Kullback–Leibler divergence between the free energy distances and the RSP expected costs for `grsp::GridRSP`.
 """
-function mean_kl_divergence(grsp::GridRSP)
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-    qs = [grsp.g.source_qualities[i] for i in grsp.g.id_to_grid_coordinate_list]
-    qt = [grsp.g.target_qualities[i] for i in grsp.g.id_to_grid_coordinate_list ∩ targetidx]
-    return qs'*(RSP_free_energy_distance(grsp.Z, grsp.θ, targetnodes) - expected_cost(grsp))*qt*grsp.θ
+function mean_kl_divergence(grsp::Union{GridRSP,NamedTuple}; 
+    free_energy_distances=nothing,
+    expected_costs=nothing,
+    kw...
+)
+    g = grsp.g
+    free_energy_distances = if isnothing(free_energy_distances)
+        RSP_free_energy_distance(grsp.Z, grsp.θ, g.targetnodes; kw...)
+    else
+        free_energy_distances
+    end
+    expected_costs = if isnothing(expected_costs)
+        ConScape.expected_cost(grsp; kw...)
+    else
+        expected_costs
+    end
+    return mean_kl_divergence(grsp::Union{GridRSP,NamedTuple}, free_energy_distances, expected_costs; kw...)
+end
+
+function mean_kl_divergence(grsp::Union{GridRSP,NamedTuple}, free_energy_distances, expected_costs; 
+    workspaces=(similar(grsp.Z),), kw...
+)
+    g = grsp.g
+    fed_exp = workspaces[1] .= free_energy_distances .- expected_costs
+    return g.qs' * fed_exp * g.qt * grsp.θ
 end
 
 
@@ -224,30 +197,44 @@ end
 
 Compute the mean Kullback–Leibler divergence between the least-cost path and the random path distribution for `grsp::GridRSP`, weighted by the qualities of the source and target node.
 """
-function mean_lc_kl_divergence(grsp::GridRSP)
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-    div = hcat([least_cost_kl_divergence(grsp.g.costmatrix, grsp.Pref, i) for i in targetnodes]...)
-    qs = [grsp.g.source_qualities[i] for i in grsp.g.id_to_grid_coordinate_list]
-    qt = [grsp.g.target_qualities[i] for i in grsp.g.id_to_grid_coordinate_list ∩ targetidx]
-    return qs'*div*qt
+function mean_lc_kl_divergence(grsp::Union{GridRSP,NamedTuple}; 
+    workspaces=[similar(grsp.Z)],
+    kw...
+)
+    workspace1 = workspaces[1]
+    g = grsp.g
+    C = g.costmatrix
+    cost_weighted_digraph = SimpleWeightedDiGraph(C)
+    n = size(C, 1)
+    from = Array{Int}(undef, n)
+    kl_div = Array{Float64}(undef, n) 
+    # Previously
+    # div = hcat([least_cost_kl_divergence(C, grsp.Pref, i; cost_weighted_digraph, from, kl_div, kw...) for i in g.targetnodes]...)
+    div = workspace1
+    for i in g.targetnodes
+        div[i, :] .= least_cost_kl_divergence(C, grsp.Pref, i; cost_weighted_digraph, from, kl_div, kw...)
+    end
+    return g.qs' * div * g.qt
 end
 
-function least_cost_kl_divergence(C::SparseMatrixCSC, Pref::SparseMatrixCSC, targetnode::Integer)
+function least_cost_kl_divergence(C::SparseMatrixCSC, Pref::SparseMatrixCSC, targetnode::Integer;
+    cost_weighted_digraph=SimpleWeightedDiGraph(C),
+    n=size(C, 1),
+    from=Array{Int}(undef, n),
+    kl_div=Array{Float64}(undef, n),
+    kw...
+)
+    from .= 1:n
+    fill!(kl_div, 0)
 
-    n = size(C, 1)
-    graph = SimpleWeightedDiGraph(C)
     if !(1 <= targetnode <= n)
         throw(ArgumentError("target node not found"))
     end
 
-    dsp = dijkstra_shortest_paths(graph, targetnode)
+    dsp = dijkstra_shortest_paths(cost_weighted_digraph, targetnode)
     parents = dsp.parents
     parents[targetnode] = targetnode
-
-    from = collect(1:n)
-    to   = copy(parents)
-
-    kl_div = zeros(n)
+    to = copy(parents)
 
     while true
         notdone = false
@@ -268,30 +255,30 @@ function least_cost_kl_divergence(C::SparseMatrixCSC, Pref::SparseMatrixCSC, tar
         end
 
         # Pointer swap
-        tmp  = from
+        tmp = from
         from = to
-        to   = tmp
+
+        to = tmp
     end
 
     return kl_div
 end
-
 """
     least_cost_kl_divergence(grsp::GridRSP, target::Tuple{Int,Int})
 
 Compute the least cost Kullback-Leibler divergence from each cell in the g in
 `h` to the `target` cell.
 """
-function least_cost_kl_divergence(grsp::GridRSP, target::Tuple{Int,Int})
-
-    targetnode = findfirst(isequal(CartesianIndex(target)), grsp.g.id_to_grid_coordinate_list)
+function least_cost_kl_divergence(grsp::Union{GridRSP,NamedTuple}, target::Tuple{Int,Int}; kw...)
+    g = grsp.g
+    targetnode = findfirst(isequal(CartesianIndex(target)), g.id_to_grid_coordinate_list)
     if targetnode === nothing
         throw(ArgumentError("target cell not found"))
     end
 
-    div = least_cost_kl_divergence(grsp.g.costmatrix, grsp.Pref, targetnode)
+    div = least_cost_kl_divergence(g.costmatrix, grsp.Pref, targetnode; kw...)
 
-    return reshape(div, grsp.g.nrows, grsp.g.ncols)
+    return reshape(div, g.nrows, g.ncols)
 end
 
 """
@@ -323,7 +310,7 @@ argument can be set to `true` to switch to a cheaper approximate solution of the
 `connectivity_function`. The default value is `false`.
 """
 function connected_habitat(
-    grsp::Union{Grid,GridRSP};
+    grsp::Grid;
     connectivity_function=expected_cost,
     distance_transformation=nothing,
     diagvalue=nothing,
@@ -332,27 +319,13 @@ function connected_habitat(
 
     # Check that distance_transformation function has been passed if no cost function is saved
     if distance_transformation === nothing && connectivity_function <: DistanceFunction
-        if grsp isa Grid
-            throw(ArgumentError("distance_transformation function is required when passing a Grid together with a Distance function"))
-        elseif grsp.g.costfunction === nothing
-            throw(ArgumentError("no distance_transformation function supplied and cost matrix in GridRSP isn't based on a cost function."))
-        else
-            distance_transformation = inv(grsp.g.costfunction)
-        end
+        throw(ArgumentError("distance_transformation function is required when passing a Grid together with a Distance function"))
     end
 
-    S = if grsp isa Grid
-        if θ === nothing && connectivity_function !== least_cost_distance
-            throw(ArgumentError("θ must be a positive real number when passing a Grid"))
-        end
-        connectivity_function(grsp; θ=θ, approx=approx)
-    else
-        if θ !== nothing
-            throw(ArgumentError("θ must be unspecified when passing a GridRSP"))
-        end
-        connectivity_function(grsp)
+    if θ === nothing && connectivity_function !== least_cost_distance
+        throw(ArgumentError("θ must be a positive real number when passing a Grid"))
     end
-
+    S = connectivity_function(grsp; θ=θ, approx=approx)
     if connectivity_function <: DistanceFunction
         map!(distance_transformation, S, S)
     end
@@ -360,74 +333,86 @@ function connected_habitat(
     return connected_habitat(grsp, S, diagvalue=diagvalue)
 end
 
-_get_grid(grsp::GridRSP) = grsp.g
-_get_grid(g::Grid)       = g
-function connected_habitat(grsp::Union{Grid,GridRSP}, S::Matrix; diagvalue::Union{Nothing,Real}=nothing)
-
+function connected_habitat(grsp::Union{GridRSP,NamedTuple}; proximities=nothing, kw...)
+    if isnothing(proximities)
+        proximities = _computeproximities(grsp; kw...)
+    end
+    return connected_habitat(grsp, proximities; kw...)
+end
+function connected_habitat(grsp::Union{Grid,GridRSP,NamedTuple}, S::Matrix;
+    diagvalue::Union{Nothing,Real}=nothing,
+    output=fill(NaN, size(grsp.g)),
+    kw...
+)
     g = _get_grid(grsp)
-    targetidx, targetnodes = _targetidx_and_nodes(g)
 
     if diagvalue !== nothing
-        for (j, i) in enumerate(targetnodes)
+        for (j, i) in enumerate(g.targetnodes)
             S[i, j] = diagvalue
         end
     end
 
-    qˢ = [g.source_qualities[i] for i in g.id_to_grid_coordinate_list]
-    qᵗ = [g.target_qualities[i] for i in targetidx]
+    funvec = connected_habitat(g.qs, g.qt, S; kw...)
 
-    funvec = connected_habitat(qˢ, qᵗ, S)
-
-    func = fill(NaN, g.nrows, g.ncols)
     for (ij, x) in zip(g.id_to_grid_coordinate_list, funvec)
-        func[ij] = x
+        output[ij] = x
     end
 
-    return func
+    return _maybe_raster(output, grsp)
 end
-
-function connected_habitat(grsp::GridRSP,
+function connected_habitat(grsp::Union{GridRSP,NamedTuple},
                            cell::CartesianIndex{2};
                            distance_transformation=nothing,
                            diagvalue=nothing,
                            avalue=floatmin(), # smallest non-zero value
                            qˢvalue=0.0,
-                           qᵗvalue=0.0)
+                           qᵗvalue=0.0, 
+                           kw...)
+
+    g = grsp.g
 
     if avalue <= 0.0
         throw("Affinity value has to be positive. Otherwise the graph will become disconnected.")
     end
 
     # Compute (linear) node indices from (cartesian) grid indices
-    targetidx, targetnodes = _targetidx_and_nodes(grsp.g)
-    node = findfirst(isequal(cell), grsp.g.id_to_grid_coordinate_list)
+    node = findfirst(isequal(cell), g.id_to_grid_coordinate_list)
 
     # Check that cell is in targetidx
-    if cell ∉ targetidx
+    if cell ∉ g.targetidx
         throw(ArgumentError("Computing adjusted connected_habitat is only supported for target cells"))
     end
 
-    affinities = copy(grsp.g.affinities)
+    affinities = copy(g.affinities)
     affinities[:, node] .= ifelse.(iszero.(affinities[:, node]), 0, avalue)
     affinities[node, :] .= ifelse.(iszero.(affinities[node, :]), 0, avalue)
 
-    newsource_qualities = copy(grsp.g.source_qualities)
+    newsource_qualities = copy(g.source_qualities)
     newsource_qualities[cell] = qˢvalue
-    newtarget_qualities = copy(grsp.g.target_qualities)
+    newtarget_qualities = copy(g.target_qualities)
     newtarget_qualities[cell] = qᵗvalue
 
-    newg = Grid(grsp.g.nrows,
-                grsp.g.ncols,
+    newtargetidx, newtargetnodes = _targetidx_and_nodes(newtarget_qualities, g.id_to_grid_coordinate_list)
+    newqs = [newsource_qualities[i] for i in g.id_to_grid_coordinate_list]
+    newqt = [newtarget_qualities[i] for i in g.id_to_grid_coordinate_list ∩ newtargetidx]
+
+    newg = Grid(g.nrows,
+                g.ncols,
                 affinities,
-                grsp.g.costfunction,
-                grsp.g.costfunction === nothing ? grsp.g.costmatrix : mapnz(grsp.g.costfunction, affinities),
-                grsp.g.id_to_grid_coordinate_list,
+                g.costfunction,
+                g.costfunction === nothing ? g.costmatrix : mapnz(g.costfunction, affinities),
+                g.id_to_grid_coordinate_list,
                 newsource_qualities,
-                newtarget_qualities)
+                newtarget_qualities,
+                newtargetidx,
+                newtargetnodes,
+                newqs,
+                newqt,
+                dims(g))
 
-    newh = GridRSP(newg, θ=grsp.θ)
+    newh = GridRSP(newg; θ=grsp.θ)
 
-    return connected_habitat(newh; diagvalue=diagvalue, distance_transformation=distance_transformation)
+    return connected_habitat(newh; diagvalue, distance_transformation)
 end
 
 """
@@ -437,53 +422,67 @@ end
         diagvalue=nothing,
         tol=1e-14)
 
-Compute the largest eigenvalue triple (left vector, value, and right vector) of the quality scaled proximities with respect to the distance/proximity measure defined by `connectivity_function`. If `connectivity_function` is a distance measure then the distances are transformed to proximities by `distance_transformation` which defaults to the inverse of the `costfunction` in the underlying `Grid` (if defined). Optionally, the diagonal values of the proximity matrix may be set to `diagvalue`. The `tol` argument specifies the convergence tolerance in the Arnoldi based eigensolver.
+Compute the largest eigenvalue triple (left vector, value, and right vector) of the 
+quality scaled proximities with respect to the distance/proximity measure defined by 
+`connectivity_function`. 
+
+If `connectivity_function` is a distance measure then the distances are transformed
+to proximities by `distance_transformation` which defaults to the inverse of the `costfunction`
+in the underlying `Grid` (if defined). Optionally, the diagonal values of the proximity matrix may 
+be set to `diagvalue`. The `tol` argument specifies the convergence tolerance in the Arnoldi based eigensolver.
 """
-function LinearAlgebra.eigmax(grsp::GridRSP;
+function LinearAlgebra.eigmax(grsp::Union{GridRSP,NamedTuple};
     connectivity_function=expected_cost,
     distance_transformation=nothing,
     diagvalue=nothing,
-    tol=1e-14)
-
+    workspaces=[similar(grsp.Z), similar(grsp.Z), similar(grsp.Z)],
+    tol=1e-14,
+    expected_costs=nothing,
+    free_energy_distances=nothing,
+    kw...
+)
     g = grsp.g
+    workspace1, workspace2, workspace3 = workspaces
 
     # Check that distance_transformation function has been passed if no cost function is saved
     if distance_transformation === nothing && connectivity_function <: DistanceFunction
-        if grsp.g.costfunction === nothing
+        if g.costfunction === nothing
             throw(ArgumentError("no distance_transformation function supplied and cost matrix in GridRSP isn't based on a cost function."))
         else
-            distance_transformation = inv(grsp.g.costfunction)
+            distance_transformation = inv(g.costfunction)
         end
     end
 
-    S = connectivity_function(grsp)
+    S = if connectivity_function == ConScape.expected_cost && !isnothing(expected_costs)
+        # workspace1 .= expected_costs
+        # workspace1
+        copy(expected_costs)
+    elseif connectivity_function == ConScape.free_energy_distance && !isnothing(free_energy_distances)
+        workspace1 .= free_energy_distances
+        workspace1
+    else
+        connectivity_function(grsp; kw...)
+    end
+    # S = connectivity_function(grsp; kw...)
 
     if connectivity_function <: DistanceFunction
         map!(distance_transformation, S, S)
     end
 
-    targetidx, targetnodes = _targetidx_and_nodes(g)
-
-    if diagvalue !== nothing
-        for (j, i) in enumerate(targetnodes)
-            S[i, j] = diagvalue
-        end
-    end
-
-    qˢ = [g.source_qualities[i] for i in g.id_to_grid_coordinate_list]
-    qᵗ = [g.target_qualities[i] for i in targetidx]
+    _maybe_set_diagonal!(S, g, diagvalue)
 
     # quality scaled proximity matrix
-    qSq = qˢ .* S .* qᵗ'
+    qSq = workspace2 .= g.qs .* S .* g.qt'
 
     # square submatrix defined by extracting the rows corresponding to landmarks
-    qSq₀₀ = qSq[targetnodes,:]
+    qSq₀₀ = view(workspace3, 1:size(workspace3, 2), :)
+    qSq₀₀ .= view(qSq, g.targetnodes, :)
 
     # size of the full problem
     n = size(g.affinities, 1)
 
     # node ids for the non-landmarks
-    p₁ = setdiff(1:n, targetnodes)
+    p₁ = setdiff(1:n, g.targetnodes)
 
     # use an Arnoldi based eigensolver to compute the largest (absolute) eigenvalue and right vector (of submatrix)
     Fps     = partialschur(qSq₀₀, nev=1, tol=tol)
@@ -540,19 +539,19 @@ function LinearAlgebra.eigmax(grsp::GridRSP;
 
     # construct full right vector
     vʳ = fill(NaN, n)
-    vʳ[targetnodes] = vʳ₀
-    vʳ[p₁] = qSq[p₁,:]*vʳ₀/λ₀[1]
+    vʳ[g.targetnodes] = vʳ₀
+    vʳ[p₁] = view(qSq, p₁, :) *vʳ₀ / λ₀[1]
 
     # compute left vector (of submatrix) by shift-invert
     Flu = lu(qSq₀₀ - λ₀[1]*I)
-    vˡ₀ = ldiv!(Flu', rand(length(targetidx)))
+    vˡ₀ = ldiv!(Flu', rand(length(g.targetidx)))
     rmul!(vˡ₀, inv(vˡ₀[1]))
 
     # construct full left vector
     vˡ = zeros(n)
-    vˡ[targetnodes] = vˡ₀
+    vˡ[g.targetnodes] = vˡ₀
 
-    return vˡ, λ₀[1], vʳ
+    return (vˡ, λ₀=λ₀[1], vʳ)
 end
 
 """
@@ -568,33 +567,62 @@ for the cell to `avalue` as well as the source and target qualities associated w
 the cell to `qˢvalue` and `qᵗvalue` respectively. It is required that `avalue` is
 positive to avoid that the graph becomes disconnected.
 """
-function criticality(grsp::GridRSP;
-                     distance_transformation=nothing,
-                     diagvalue=nothing,
-                     avalue=floatmin(),
-                     qˢvalue=0.0,
-                     qᵗvalue=0.0)
-
-    targetidx, _ = _targetidx_and_nodes(grsp.g)
-    nl = length(targetidx)
-    reference_connected_habitat = sum(connected_habitat(grsp, distance_transformation=distance_transformation, diagvalue=diagvalue))
+function criticality(grsp::Union{GridRSP,NamedTuple};
+    distance_transformation=nothing,
+    diagvalue=nothing,
+    avalue=floatmin(),
+    output=fill(NaN, size(grsp.g)),
+    qˢvalue=0.0,
+    qᵗvalue=0.0,
+    kw...
+)
+    g = grsp.g
+    nl = length(g.targetidx)
+    reference_connected_habitat = sum(connected_habitat(grsp; 
+        distance_transformation, diagvalue, kw...
+    ))
     critvec = fill(reference_connected_habitat, nl)
 
     @progress name="Computing criticality..." for i in 1:nl
-        critvec[i] -= sum(connected_habitat(
-            grsp,
-            targetidx[i];
-            distance_transformation=distance_transformation,
-            diagvalue=diagvalue,
-            avalue=avalue,
-            qˢvalue=qˢvalue,
-            qᵗvalue=qᵗvalue))
+        critvec[i] = sum(connected_habitat(grsp, g.targetidx[i];
+            distance_transformation, diagvalue, avalue, qˢvalue, qᵗvalue, kw...
+        ))
     end
 
-    landscape = fill(NaN, size(grsp.g))
-    landscape[targetidx] = critvec
+    output[g.targetidx] = critvec
 
-    return landscape
+    return _maybe_raster(output, grsp)
+end
+
+function _computeproximities(grsp; 
+    connectivity_function=expected_cost,
+    distance_transformation=nothing,
+    diagvalue=nothing,
+    kw...
+)
+    g = grsp.g
+    proximities = connectivity_function(grsp; kw...)
+
+    # Check that distance_transformation function has been passed if no cost function is saved
+    if connectivity_function <: DistanceFunction
+        if distance_transformation === nothing
+            if g.costfunction === nothing
+                throw(ArgumentError("no distance_transformation function supplied and cost matrix in GridRSP isn't based on a cost function."))
+            else
+                distance_transformation = inv(g.costfunction)
+            end
+        end
+        map!(distance_transformation, proximities, proximities)
+    end
+    _maybe_set_diagonal!(proximities, g.targetnodes, diagvalue)
+    return proximities
+end
+
+_maybe_set_diagonal!(proximities, targetnodes, diagvalue::Nothing) = nothing
+function _maybe_set_diagonal!(proximities, targetnodes, diagvalue)
+    for (j, i) in enumerate(targetnodes)
+        proximities[i, j] = diagvalue
+    end
 end
 
 
