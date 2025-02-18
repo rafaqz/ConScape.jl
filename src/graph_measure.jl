@@ -33,6 +33,27 @@ end
 struct MeanLeastCostKullbackLeiblerDivergence <: PathDistributionMeasure end
 struct MeanKullbackLeiblerDivergence <: PathDistributionMeasure end
 
+abstract type SensitivityContext end
+
+struct Affinity <: SensitivityContext end
+struct Cost <: SensitivityContext end
+struct Quality <: SensitivityContext end
+
+abstract type CostAndAffinitySensitivityContext end
+struct CostAndAffinity <: CostAndAffinitySensitivityContext end
+struct AffinityAndCost <: CostAndAffinitySensitivityContext end
+
+abstract type LandscapeMeasure end
+
+struct LandscapeSum <: LandscapeMeasure end
+struct LandscapeEigen <: LandscapeMeasure end
+
+@kwdef struct Sensitivity{C<:SeensitivityContext,LM<:LandscapeMeasure} <: PerturbationMeasure
+    wrt::C
+    landscare_measure::LM
+    unitless::Bool
+end
+
 # Map structs to function calls
 
 graph_function(m::BetweennessKweighted) = betweenness_kweighted
